@@ -42,11 +42,10 @@ async fn gateway_handler(
     let is_read = method == Method::GET || method == Method::HEAD;
 
     // GET/HEAD 查缓存
-    if is_read {
-        if let Some(cached) = state.cache.get(&cache_key).await {
+    if is_read
+        && let Some(cached) = state.cache.get(&cache_key).await {
             return hit(cached, &method);
         }
-    }
 
     // 转发到后端（HEAD 也用 GET 代理，以获取完整 body 用于缓存）
     let proxy_method = if method == Method::HEAD {

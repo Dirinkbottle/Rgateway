@@ -6,7 +6,6 @@ mod routes;
 
 use routes::AppState;
 use tower_http::trace::TraceLayer;
-use tracing_subscriber;
 
 #[tokio::main]
 async fn main() {
