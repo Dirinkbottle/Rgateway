@@ -25,8 +25,12 @@ pub struct Proxy {
 
 impl Proxy {
     pub fn new(backend_url: String) -> Self {
+        let client = Client::builder()
+            .pool_max_idle_per_host(1)
+            .build()
+            .expect("构建 HTTP 客户端失败");
         Self {
-            client: Client::new(),
+            client,
             backend_url,
         }
     }

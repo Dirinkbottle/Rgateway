@@ -7,7 +7,7 @@ mod routes;
 use routes::AppState;
 use tower_http::trace::TraceLayer;
 
-#[tokio::main]
+#[tokio::main(worker_threads = 2)]
 async fn main() {
     // 初始化日志
     tracing_subscriber::fmt().with_env_filter("info").init();
