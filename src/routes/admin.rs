@@ -1,9 +1,9 @@
 use axum::{
+    Json, Router,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{delete, get, post},
-    Json, Router,
 };
 use serde::Deserialize;
 
@@ -35,10 +35,7 @@ async fn clear_cache(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 /// POST /__gateway/invalidate  {"tag":"..."} 或 {"path":"..."}
-async fn invalidate(
-    State(state): State<AppState>,
-    Json(body): Json<InvalidateBody>,
-) -> Response {
+async fn invalidate(State(state): State<AppState>, Json(body): Json<InvalidateBody>) -> Response {
     match (body.tag, body.path) {
         (Some(tag), _) => {
             state.cache.invalidate_by_tag(&tag).await;
@@ -48,7 +45,10 @@ async fn invalidate(
             state.cache.invalidate_by_path(&path).await;
             StatusCode::NO_CONTENT.into_response()
         }
-        _ => (StatusCode::BAD_REQUEST,
-              Json(serde_json::json!({"error": "需要 tag 或 path 字段"}))).into_response(),
+        _ => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "需要 tag 或 path 字段"})),
+        )
+            .into_response(),
     }
 }

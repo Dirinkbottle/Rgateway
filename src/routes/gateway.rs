@@ -1,10 +1,10 @@
 use axum::{
+    Router,
     body::Bytes,
     extract::State,
     http::{HeaderMap, HeaderName, HeaderValue, Method, Uri},
     response::{IntoResponse, Response},
     routing::any,
-    Router,
 };
 
 use crate::cache::CachedResponse;
@@ -35,9 +35,7 @@ async fn gateway_handler(
     let cache_key = format!(
         "{}{}",
         uri.path(),
-        uri.query()
-            .map(|q| format!("?{}", q))
-            .unwrap_or_default()
+        uri.query().map(|q| format!("?{}", q)).unwrap_or_default()
     );
 
     // get和head读缓存
@@ -51,8 +49,12 @@ async fn gateway_handler(
     }
 
     // 转发到后端（HEAD 也用 GET 代理，以获取完整 body 用于缓存）
-    let proxy_method = if method == Method::HEAD { &Method::GET } else { &method };
-   
+    let proxy_method = if method == Method::HEAD {
+        &Method::GET
+    } else {
+        &method
+    };
+
     match state
         .proxy
         .forward(proxy_method, uri.path(), uri.query(), &headers, &body)

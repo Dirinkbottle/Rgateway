@@ -3,8 +3,8 @@ use moka::future::Cache as MokaCache;
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -66,12 +66,7 @@ impl Cache {
     }
 
     /// 写入缓存
-    pub async fn set(
-        &self,
-        key: String,
-        resp: CachedResponse,
-        tag: Option<String>,
-    ) {
+    pub async fn set(&self, key: String, resp: CachedResponse, tag: Option<String>) {
         if let Some(ref tag) = tag {
             let mut idx = self.tag_index.write().await;
             idx.entry(tag.clone()).or_default().push(key.clone());

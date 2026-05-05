@@ -58,9 +58,10 @@ impl Proxy {
             req = req.body(body.to_vec());
         }
 
-        let resp = req.send().await.map_err(|e| {
-            AppError::BackendUnreachable(format!("后端不可达: {}", e))
-        })?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| AppError::BackendUnreachable(format!("后端不可达: {}", e)))?;
 
         let status = resp.status();
 
@@ -93,14 +94,13 @@ impl Proxy {
                 let n = name.as_str().to_lowercase();
                 n != "x-cache-ttl" && n != "x-cache-tag" && n != "x-cache-skip"
             })
-            .map(|(name, value)| {
-                (name.to_string(), value.to_str().unwrap_or("").to_string())
-            })
+            .map(|(name, value)| (name.to_string(), value.to_str().unwrap_or("").to_string()))
             .collect();
 
-        let body = resp.bytes().await.map_err(|e| {
-            AppError::BackendError(status, format!("读取后端响应体失败: {}", e))
-        })?;
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| AppError::BackendError(status, format!("读取后端响应体失败: {}", e)))?;
 
         Ok(ProxyResponse {
             status,

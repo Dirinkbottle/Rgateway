@@ -22,10 +22,12 @@ async fn main() {
         .with_state(state.clone());
 
     let public_addr = format!("0.0.0.0:{}", config.public_port);
-    let public_listener = tokio::net::TcpListener::bind(&public_addr).await.unwrap_or_else(|e| {
-        eprintln!("无法绑定公开端口 {}: {}", public_addr, e);
-        std::process::exit(1);
-    });
+    let public_listener = tokio::net::TcpListener::bind(&public_addr)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("无法绑定公开端口 {}: {}", public_addr, e);
+            std::process::exit(1);
+        });
 
     // === 管理服务（端口 3001）===
     let admin_app = routes::admin::router()
@@ -33,10 +35,12 @@ async fn main() {
         .with_state(state);
 
     let admin_addr = format!("127.0.0.1:{}", config.admin_port);
-    let admin_listener = tokio::net::TcpListener::bind(&admin_addr).await.unwrap_or_else(|e| {
-        eprintln!("无法绑定管理端口 {}: {}", admin_addr, e);
-        std::process::exit(1);
-    });
+    let admin_listener = tokio::net::TcpListener::bind(&admin_addr)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("无法绑定管理端口 {}: {}", admin_addr, e);
+            std::process::exit(1);
+        });
 
     tracing::info!(
         "Rgateway 启动 — 公开端口: {}, 管理端口: {}, 后端: {}",
