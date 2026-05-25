@@ -13,6 +13,10 @@ pub struct Config {
     pub default_ttl: Duration,
     /// 最大缓存条目数
     pub max_entries: u64,
+    /// Watchdog 配置文件路径
+    pub watchdog_config_path: String,
+    /// Admin API Bearer Token（为空则不鉴权，仅限开发环境）
+    pub admin_token: String,
 }
 
 const THREE_DAYS: u64 = 259200;
@@ -29,6 +33,9 @@ impl Config {
             admin_port: parse_env("ADMIN_PORT", 3001),
             default_ttl: Duration::from_secs(parse_env("CACHE_TTL_SECS", THREE_DAYS)),
             max_entries: parse_env("CACHE_MAX_ENTRIES", 10000),
+            watchdog_config_path: std::env::var("WATCHDOG_CONFIG_PATH")
+                .unwrap_or_else(|_| "watchdog.json".into()),
+            admin_token: std::env::var("ADMIN_TOKEN").unwrap_or_default(),
         }
     }
 }

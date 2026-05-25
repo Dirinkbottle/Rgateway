@@ -1,10 +1,132 @@
-# Rgateway
+# Rgateway (ZFSG)
 
-导航站缓存外围网关。Rust + Axum，前置在 Go 业务后端之前提供缓存层。
+Zero-Friction Security Gateway — Rust/Axum 反向代理网关，前置在 Go 业务后端之前，提供缓存层 + 请求加密 + 多层安全管道。
+
+---
+
+## 一、前端接入（Watchdog 安全模块）
+
+### 什么是 fetch？
+
+`fetch` 是浏览器内置的 **Fetch API**（`window.fetch`），用于以 JavaScript 发起 HTTP 请求。它是现代前端与后端通信的核心方式：
+
+```javascript
+const response = await fetch('/api/sites');
+const data = await response.json();
+```
+
+几乎所有前端框架（React、Vue、Svelte 等）的网络请求底层都基于 `fetch`。
+
+### 什么请求会被捕获？
+
+Watchdog WASM 模块通过 **替换全局 `window.fetch` 函数** 来拦截请求。只有通过 `fetch()` 发起的请求会被自动加密：
+
+| 请求方式              | 是否被捕获 | 说明                                          |
+| --------------------- | ---------- | --------------------------------------------- |
+| `fetch('/api/...')`   | **是**     | WASM 替换了 `window.fetch`                    |
+| `axios.get(...)`      | **是**     | axios 默认使用 fetch（旧版用 XMLHttpRequest） |
+| `XMLHttpRequest`      | **否**     | 浏览器原生 API，未被 hook                     |
+| `WebSocket`           | **否**     | 不同协议，不经过 fetch                        |
+| `<form>` 表单提交     | **否**     | 浏览器原生行为，不经过 fetch                  |
+| `<img src="...">`     | **否**     | 资源加载，不经过 fetch                        |
+
+### 接入步骤（三步完成）
+
+#### 步骤 1：加载 WASM 胶水代码
+
+```javascript
+import * as bg from 'http://your-gateway:3000/gateway/watchdogheader';
+```
+
+#### 步骤 2：实例化 WASM 模块
+
+```javascript
+const BASE = 'http://your-gateway:3000';
+const wasmUrl = `${BASE}/gateway/watchdogbody`;
+const imports = { "./openatomic_watchdog_bg.js": bg };
+const { instance } = await WebAssembly.instantiateStreaming(
+    fetch(wasmUrl),
+    imports
+);
+bg.__wbg_set_wasm(instance.exports);
+```
+
+#### 步骤 3：初始化（自动 hook fetch）
+
+```javascript
+await bg.initialize(BASE);
+
+// 此后所有 fetch 请求自动加密，无需修改任何业务代码
+const sites = await fetch('/api/sites').then(r => r.json());
+```
+
+### 完整示例
+
+```html
+<script type="module">
+    const BASE = 'http://your-gateway:3000';
+    import * as bg from `${BASE}/gateway/watchdogheader`;
+
+    const wasmUrl = `${BASE}/gateway/watchdogbody`;
+    const imports = { "./openatomic_watchdog_bg.js": bg };
+    const { instance } = await WebAssembly.instantiateStreaming(
+        fetch(wasmUrl), imports
+    );
+    bg.__wbg_set_wasm(instance.exports);
+    await bg.initialize(BASE);
+
+    // === 以下所有 fetch 调用自动加密 ===
+    const res = await fetch('/api/sites');
+    const data = await res.json();
+</script>
+```
+
+### 工作原理
+
+```text
+前端代码              WASM (hook)           网关 (Rgateway)         后端
+─────────────────────────────────────────────────────────────────────────
+fetch('/api/sites')
+        │
+        ▼
+  window.fetch 被替换 ──► AES-256-GCM 加密
+                          [12B nonce][8B rolling_nonce]
+                          [8B timestamp][8B counter]
+                          [session_id][ciphertext][16B MAC]
+        │
+        ▼
+  POST /gateway/encrypted_relay ──────► 解密 + 安全检查 ──────► /api/sites
+                                         (注入检测/参数校验/
+                                          速率限制/JA3过滤)
+        │
+        ▼
+  响应返回 ◄──────────────────────────── 代理响应 ◄──────────── JSON 响应
+```
+
+### 网关端点
+
+| 端点                        | 用途                             | 方法 |
+| --------------------------- | -------------------------------- | ---- |
+| `/gateway/watchdogbody`     | 下载 WASM 二进制模块             | GET  |
+| `/gateway/watchdogheader`   | 下载 JS 胶水代码                 | GET  |
+| `/gateway/challenge`        | 请求挑战（握手第一步）           | POST |
+| `/gateway/challenge/verify` | 验证挑战、获取临时密钥           | POST |
+| `/gateway/encrypted_relay`  | 加密请求中继（所有加密流量入口） | POST |
+
+### 安全特性（自动生效）
+
+- **AES-256-GCM 加密** — 每个请求使用独立密钥（HKDF 从临时密钥 + 滚动码派生）
+- **防重放** — 严格递增的请求计数器 + 时间戳校验
+- **防自动化** — 滚动码固定步长 + 最小请求间隔（clock fuse < 10ms 触发脏包）
+- **防篡改** — HMAC-SHA256 MAC 验证，常量时间比较
+- **会话隔离** — 每次握手签发独立临时密钥，内置密钥不直接用于加密
+- **IP 绑定** — 挑战与客户端 IP 绑定，防止跨 IP 劫持
+
+---
 
 ## 架构
 
-```
+```text
 浏览器 ──→ Rgateway (:3000) ──→ Go Backend (:8080)
                 │
            ┌────┴────┐

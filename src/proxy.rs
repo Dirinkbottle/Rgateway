@@ -4,6 +4,27 @@ use reqwest::Client;
 use crate::error::AppError;
 use std::time::Duration;
 
+fn should_strip_header(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    matches!(
+        n.as_str(),
+        // 目标后端应自行计算
+        "host"
+            | "content-length"
+            | "transfer-encoding"
+            // hop-by-hop
+            | "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "upgrade"
+            // 可能导致后端等待 request body
+            | "expect"
+    )
+}
+
 /// 代理响应（已剥离网关内部控制头）
 pub struct ProxyResponse {
     pub status: StatusCode,
@@ -26,7 +47,9 @@ pub struct Proxy {
 impl Proxy {
     pub fn new(backend_url: String) -> Self {
         let client = Client::builder()
-            .pool_max_idle_per_host(1)
+            .pool_max_idle_per_host(8)
+            .timeout(Duration::from_secs(10))
+            .connect_timeout(Duration::from_secs(3))
             .build()
             .expect("构建 HTTP 客户端失败");
         Self {
@@ -49,23 +72,43 @@ impl Proxy {
         } else {
             format!("{}{}", self.backend_url, path)
         };
+        let start = std::time::Instant::now();
+        tracing::info!(
+            "[proxy] forward start: method={} url={} body_len={}",
+            method,
+            url,
+            body.len()
+        );
 
         // 构建 reqwest 请求，复制原始头（排除 host）
         let mut req = self.client.request(method.clone(), &url);
         for (name, value) in headers.iter() {
-            if name.as_str().to_lowercase() != "host" {
-                req = req.header(name.as_str(), value.as_bytes());
+            if should_strip_header(name.as_str()) {
+                continue;
             }
+            req = req.header(name.as_str(), value.as_bytes());
         }
 
         if !body.is_empty() {
             req = req.body(body.to_vec());
+        } else {
+            // 确保不会带着错误的 Content-Length/传输语义
+            req = req.header("content-length", "0");
         }
 
         let resp = req
             .send()
             .await
-            .map_err(|e| AppError::BackendUnreachable(format!("后端不可达: {}", e)))?;
+            .map_err(|e| {
+                tracing::warn!(
+                    "[proxy] forward send failed: method={} url={} elapsed_ms={} err={}",
+                    method,
+                    url,
+                    start.elapsed().as_millis(),
+                    e
+                );
+                AppError::BackendUnreachable(format!("后端不可达: {}", e))
+            })?;
 
         let status = resp.status();
 
@@ -105,6 +148,15 @@ impl Proxy {
             .bytes()
             .await
             .map_err(|e| AppError::BackendError(status, format!("读取后端响应体失败: {}", e)))?;
+
+        tracing::info!(
+            "[proxy] forward done: method={} url={} status={} resp_len={} elapsed_ms={}",
+            method,
+            url,
+            status.as_u16(),
+            body.len(),
+            start.elapsed().as_millis()
+        );
 
         Ok(ProxyResponse {
             status,
