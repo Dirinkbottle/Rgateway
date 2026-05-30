@@ -105,8 +105,8 @@ impl RuleBuckets {
 mod tests {
     use super::*;
     use crate::watchdog::config::{
-        ParamsConfig, Rule, WatchdogConfig, CorsConfig, CryptoConfig,
-        RateLimitConfig, NetworkConfig,
+        CorsConfig, CryptoConfig, NetworkConfig, ParamsConfig, RateLimitConfig, Rule,
+        WatchdogConfig,
     };
 
     fn make_config(rules: Vec<Rule>) -> WatchdogConfig {

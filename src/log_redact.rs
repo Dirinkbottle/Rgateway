@@ -54,7 +54,10 @@ mod tests {
 
     #[test]
     fn test_redact_url() {
-        assert_eq!(redact_url("/api/sites?category=news&page=1"), "/api/sites?***");
+        assert_eq!(
+            redact_url("/api/sites?category=news&page=1"),
+            "/api/sites?***"
+        );
         assert_eq!(redact_url("/api/sites"), "/api/sites");
         assert_eq!(redact_url("/health?check=true"), "/health?***");
     }

@@ -8,7 +8,7 @@
 //! 5. AES-GCM 解密
 //! 6. 解析明文：[method长度(1字节)] + [method] + [URL长度(2字节)] + [URL] + [Body]
 
-use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::net::IpAddr;
@@ -69,8 +69,7 @@ fn verify_mac(
     ciphertext: &[u8],
     expected_tag: &[u8; 16],
 ) -> bool {
-    let mut mac =
-        <HmacSha256 as Mac>::new_from_slice(ephemeral_key).expect("HMAC 密钥创建失败");
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(ephemeral_key).expect("HMAC 密钥创建失败");
     mac.update(&rolling_nonce.to_le_bytes());
     mac.update(&timestamp.to_le_bytes());
     mac.update(&request_counter.to_le_bytes());
@@ -78,9 +77,7 @@ fn verify_mac(
     let result = mac.finalize().into_bytes();
 
     use subtle::ConstantTimeEq;
-    let eq: bool = result[..16]
-        .ct_eq(expected_tag)
-        .into();
+    let eq: bool = result[..16].ct_eq(expected_tag).into();
     eq
 }
 
@@ -108,12 +105,7 @@ impl Decryptor {
     }
 
     /// 校验滚动码是否是固定步长的合法前进
-    fn is_valid_forward_progress(
-        &self,
-        prev: u64,
-        current: u64,
-        nonce_step: u64,
-    ) -> bool {
+    fn is_valid_forward_progress(&self, prev: u64, current: u64, nonce_step: u64) -> bool {
         if current == prev {
             return false;
         }
@@ -211,7 +203,11 @@ impl Decryptor {
             ciphertext,
             &mac_tag,
         ) {
-            tracing::warn!("[decrypt] MAC 验证失败: session_id={}, IP={}", session_id, ip);
+            tracing::warn!(
+                "[decrypt] MAC 验证失败: session_id={}, IP={}",
+                session_id,
+                ip
+            );
             return Err(DecryptError::MacVerificationFailed);
         }
 
@@ -245,16 +241,17 @@ impl Decryptor {
                 session.rolling_nonce,
                 rolling_nonce,
                 session.nonce_step,
-            ) {
-                tracing::warn!(
-                    "[decrypt] 非法 rolling_nonce={}, last={}, step={}, IP={}",
-                    rolling_nonce,
-                    session.rolling_nonce,
-                    session.nonce_step,
-                    ip
-                );
-                return Err(DecryptError::DecryptionFailed);
-            }
+            )
+        {
+            tracing::warn!(
+                "[decrypt] 非法 rolling_nonce={}, last={}, step={}, IP={}",
+                rolling_nonce,
+                session.rolling_nonce,
+                session.nonce_step,
+                ip
+            );
+            return Err(DecryptError::DecryptionFailed);
+        }
 
         // 防重放：时间戳必须严格递增
         if timestamp <= session.last_timestamp {
@@ -269,8 +266,8 @@ impl Decryptor {
 
         // 5. 用临时密钥推导 AES 密钥并解密
         let key = derive_key(&ephemeral_key, rolling_nonce);
-        let cipher = Aes256Gcm::new_from_slice(&key)
-            .map_err(|_| DecryptError::KeyDerivationFailed)?;
+        let cipher =
+            Aes256Gcm::new_from_slice(&key).map_err(|_| DecryptError::KeyDerivationFailed)?;
 
         let mut aad = Vec::with_capacity(24);
         aad.extend_from_slice(&rolling_nonce.to_le_bytes());
@@ -312,10 +309,8 @@ impl Decryptor {
         if plaintext.len() < url_offset + 2 + url_len {
             return Err(DecryptError::InvalidPacket);
         }
-        let url = String::from_utf8_lossy(
-            &plaintext[url_offset + 2..url_offset + 2 + url_len],
-        )
-        .to_string();
+        let url = String::from_utf8_lossy(&plaintext[url_offset + 2..url_offset + 2 + url_len])
+            .to_string();
         let body = plaintext[url_offset + 2 + url_len..].to_vec();
 
         tracing::info!(
@@ -335,7 +330,7 @@ impl Decryptor {
 mod tests {
     use super::*;
     use crate::watchdog::challenge::ChallengeManager;
-    use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
+    use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
     use std::net::IpAddr;
@@ -439,7 +434,9 @@ mod tests {
         let mut mac = <HmacSha256 as Mac>::new_from_slice(&bootstrap_bytes).unwrap();
         mac.update(&challenge);
         let hmac_bytes = mac.finalize().into_bytes();
-        let (sid, ekey) = cm.verify_and_create_session(&cid, &hmac_bytes, ip()).unwrap();
+        let (sid, ekey) = cm
+            .verify_and_create_session(&cid, &hmac_bytes, ip())
+            .unwrap();
         let session = cm.get_session(&sid).unwrap();
         let step = session.nonce_step;
         drop(session);
@@ -462,7 +459,9 @@ mod tests {
         let mut mac = <HmacSha256 as Mac>::new_from_slice(&bootstrap_bytes).unwrap();
         mac.update(&challenge);
         let hmac_bytes = mac.finalize().into_bytes();
-        let (sid, ekey) = cm.verify_and_create_session(&cid, &hmac_bytes, ip()).unwrap();
+        let (sid, ekey) = cm
+            .verify_and_create_session(&cid, &hmac_bytes, ip())
+            .unwrap();
         let session = cm.get_session(&sid).unwrap();
         let step = session.nonce_step;
         drop(session);
@@ -492,7 +491,9 @@ mod tests {
         let mut mac = <HmacSha256 as Mac>::new_from_slice(&bootstrap_bytes).unwrap();
         mac.update(&challenge);
         let hmac_bytes = mac.finalize().into_bytes();
-        let (sid, ekey) = cm.verify_and_create_session(&cid, &hmac_bytes, ip()).unwrap();
+        let (sid, ekey) = cm
+            .verify_and_create_session(&cid, &hmac_bytes, ip())
+            .unwrap();
         let session = cm.get_session(&sid).unwrap();
         let step = session.nonce_step;
         drop(session);
@@ -504,13 +505,25 @@ mod tests {
         // counter=3 跳过了 2，应失败
         let next_nonce = step.wrapping_add(step);
         let p3 = build_packet(&ekey, &sid, next_nonce, 1001, 3, "GET", "/api/b", b"");
-        assert!(matches!(decryptor.decrypt(ip(), &p3), Err(DecryptError::CounterMismatch)));
+        assert!(matches!(
+            decryptor.decrypt(ip(), &p3),
+            Err(DecryptError::CounterMismatch)
+        ));
     }
 
     #[test]
     fn test_invalid_session_rejected() {
         let (decryptor, _, ekey) = setup_session();
-        let packet = build_packet(&ekey, "nonexistent_session_id", 1, 1000, 1, "GET", "/api/test", b"");
+        let packet = build_packet(
+            &ekey,
+            "nonexistent_session_id",
+            1,
+            1000,
+            1,
+            "GET",
+            "/api/test",
+            b"",
+        );
         let result = decryptor.decrypt(ip(), &packet);
         assert!(matches!(result, Err(DecryptError::InvalidSession)));
     }
@@ -524,7 +537,9 @@ mod tests {
         let mut mac = <HmacSha256 as Mac>::new_from_slice(&bootstrap_bytes).unwrap();
         mac.update(&challenge);
         let hmac_bytes = mac.finalize().into_bytes();
-        let (sid, ekey) = cm.verify_and_create_session(&cid, &hmac_bytes, ip()).unwrap();
+        let (sid, ekey) = cm
+            .verify_and_create_session(&cid, &hmac_bytes, ip())
+            .unwrap();
 
         // 获取 nonce_step 以构造合法的 rolling_nonce
         let session = cm.get_session(&sid).unwrap();

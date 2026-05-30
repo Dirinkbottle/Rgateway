@@ -5,13 +5,8 @@ use crate::{
     config::Config,
     proxy::Proxy,
     watchdog::{
-        challenge::ChallengeManager,
-        config::WatchdogConfig,
-        cors::CorsGuard,
-        decrypt::Decryptor,
-        inject::InjectionGuard,
-        ja3_filter::Ja3Filter,
-        params::ParamValidator,
+        challenge::ChallengeManager, config::WatchdogConfig, cors::CorsGuard, decrypt::Decryptor,
+        inject::InjectionGuard, ja3_filter::Ja3Filter, params::ParamValidator,
         rate_limit::RateLimiter,
     },
 };
@@ -71,10 +66,8 @@ impl AppState {
         let mut cookie_key = [0u8; 32];
         getrandom::getrandom(&mut cookie_key).expect("Cookie 签名密钥生成失败");
 
-        let ja3_filter = Ja3Filter::new(
-            cookie_key,
-            watchdog_config.network.cookie_challenge_enabled,
-        );
+        let ja3_filter =
+            Ja3Filter::new(cookie_key, watchdog_config.network.cookie_challenge_enabled);
         let inject_guard = InjectionGuard::new();
         let rate_limiter = RateLimiter::new(&watchdog_config.rate_limit);
         let cors_guard = CorsGuard::new(&watchdog_config.cors);

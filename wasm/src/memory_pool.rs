@@ -65,6 +65,7 @@ impl MemoryPool {
 
     /// 读取滚动码：通过动态偏移量从内存池中读取
     /// 滚动码真实值隐藏在 pool[offset..offset+8] 中
+    #[allow(dead_code)]
     pub fn read_nonce(&self) -> u64 {
         let offset = self.compute_offset();
         u64::from_le_bytes(
@@ -102,6 +103,7 @@ impl MemoryPool {
     }
 
     /// TCP 重连后重置滚动码
+    #[allow(dead_code)]
     pub fn reset_nonce(&mut self) {
         self.rolling_nonce = 0;
         let reset_offset = self.compute_offset();

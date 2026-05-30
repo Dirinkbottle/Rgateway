@@ -97,19 +97,16 @@ impl Proxy {
             req = req.header("content-length", "0");
         }
 
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| {
-                tracing::warn!(
-                    "[proxy] forward send failed: method={} url={} elapsed_ms={} err={}",
-                    method,
-                    url,
-                    start.elapsed().as_millis(),
-                    e
-                );
-                AppError::BackendUnreachable(format!("后端不可达: {}", e))
-            })?;
+        let resp = req.send().await.map_err(|e| {
+            tracing::warn!(
+                "[proxy] forward send failed: method={} url={} elapsed_ms={} err={}",
+                method,
+                url,
+                start.elapsed().as_millis(),
+                e
+            );
+            AppError::BackendUnreachable(format!("后端不可达: {}", e))
+        })?;
 
         let status = resp.status();
 

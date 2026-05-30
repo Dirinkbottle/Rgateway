@@ -63,22 +63,18 @@ async fn cors_preflight(State(state): State<AppState>, headers: HeaderMap) -> Re
 
 /// 下发 Wasm 二进制（使用 spawn_blocking 避免阻塞 tokio 工作线程）
 async fn wasm_bg() -> Response {
-    match tokio::task::spawn_blocking(|| std::fs::read("./wasm/pkg/openatomic_watchdog_bg.wasm")).await {
+    match tokio::task::spawn_blocking(|| std::fs::read("./wasm/pkg/openatomic_watchdog_bg.wasm"))
+        .await
+    {
         Ok(Ok(bytes)) => {
             let mut resp = Response::new(axum::body::Body::from(bytes));
             let h = resp.headers_mut();
-            h.insert(
-                "content-type",
-                HeaderValue::from_static("application/wasm"),
-            );
+            h.insert("content-type", HeaderValue::from_static("application/wasm"));
             h.insert(
                 "cache-control",
                 HeaderValue::from_static("public, max-age=3600"),
             );
-            h.insert(
-                "access-control-allow-origin",
-                HeaderValue::from_static("*"),
-            );
+            h.insert("access-control-allow-origin", HeaderValue::from_static("*"));
             resp
         }
         _ => {
@@ -102,10 +98,7 @@ async fn wasm_glue() -> Response {
                 "cache-control",
                 HeaderValue::from_static("public, max-age=3600"),
             );
-            h.insert(
-                "access-control-allow-origin",
-                HeaderValue::from_static("*"),
-            );
+            h.insert("access-control-allow-origin", HeaderValue::from_static("*"));
             resp
         }
         _ => {
@@ -117,7 +110,9 @@ async fn wasm_glue() -> Response {
 
 /// 下发 Wasm JS 胶水层（使用 spawn_blocking）
 async fn wasm_header() -> Response {
-    match tokio::task::spawn_blocking(|| std::fs::read("./wasm/pkg/openatomic_watchdog_bg.js")).await {
+    match tokio::task::spawn_blocking(|| std::fs::read("./wasm/pkg/openatomic_watchdog_bg.js"))
+        .await
+    {
         Ok(Ok(bytes)) => {
             let mut resp = Response::new(axum::body::Body::from(bytes));
             let h = resp.headers_mut();
@@ -129,10 +124,7 @@ async fn wasm_header() -> Response {
                 "cache-control",
                 HeaderValue::from_static("public, max-age=3600"),
             );
-            h.insert(
-                "access-control-allow-origin",
-                HeaderValue::from_static("*"),
-            );
+            h.insert("access-control-allow-origin", HeaderValue::from_static("*"));
             resp
         }
         _ => {
@@ -197,24 +189,24 @@ fn ip_in_cidr(ip: IpAddr, cidr: &str) -> bool {
 /// 只有当 TCP 对端 IP 在可信代理列表中时，才信任 X-Forwarded-For / X-Real-IP。
 /// 否则直接使用 TCP 连接的对端地址。
 fn extract_client_ip(headers: &HeaderMap, peer_addr: IpAddr, trusted_proxies: &[String]) -> IpAddr {
-    let is_trusted = trusted_proxies.iter().any(|cidr| ip_in_cidr(peer_addr, cidr));
+    let is_trusted = trusted_proxies
+        .iter()
+        .any(|cidr| ip_in_cidr(peer_addr, cidr));
 
     if is_trusted {
         // 优先 X-Forwarded-For（取第一个，即原始客户端 IP）
-        if let Some(xff) = headers
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok())
+        if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok())
             && let Some(first) = xff.split(',').next()
-                && let Ok(ip) = first.trim().parse::<IpAddr>() {
-                    return ip;
-                }
+            && let Ok(ip) = first.trim().parse::<IpAddr>()
+        {
+            return ip;
+        }
         // 其次 X-Real-IP
-        if let Some(xri) = headers
-            .get("x-real-ip")
-            .and_then(|v| v.to_str().ok())
-            && let Ok(ip) = xri.parse::<IpAddr>() {
-                return ip;
-            }
+        if let Some(xri) = headers.get("x-real-ip").and_then(|v| v.to_str().ok())
+            && let Ok(ip) = xri.parse::<IpAddr>()
+        {
+            return ip;
+        }
     }
 
     peer_addr
@@ -298,15 +290,13 @@ async fn challenge_verify_handler(
     let trusted = &state.watchdog_config.network.trusted_proxies;
     let ip = extract_client_ip(&headers, peer_addr, trusted);
 
-    let response_bytes = match base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        &body.response,
-    ) {
-        Ok(b) => b,
-        Err(_) => {
-            return (StatusCode::BAD_REQUEST, "无效的 base64 编码").into_response();
-        }
-    };
+    let response_bytes =
+        match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &body.response) {
+            Ok(b) => b,
+            Err(_) => {
+                return (StatusCode::BAD_REQUEST, "无效的 base64 编码").into_response();
+            }
+        };
 
     match state
         .challenge_manager
@@ -469,7 +459,11 @@ async fn encrypted_relay_handler(
             return StatusCode::METHOD_NOT_ALLOWED.into_response();
         }
         crate::watchdog::params::ParamCheckResult::InvalidParam(msg) => {
-            tracing::warn!("[encrypted_relay] rejected by params: msg={}, ip={}", msg, ip);
+            tracing::warn!(
+                "[encrypted_relay] rejected by params: msg={}, ip={}",
+                msg,
+                ip
+            );
             return (StatusCode::BAD_REQUEST, msg).into_response();
         }
     }

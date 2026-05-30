@@ -34,16 +34,17 @@ impl IntoResponse for AppError {
             AppError::BackendError(code, e) => (code, e),
             AppError::ParamValidation(e) => (StatusCode::BAD_REQUEST, e),
             AppError::ChallengeFailed(e) => (StatusCode::UNAUTHORIZED, e),
-            AppError::InjectionDetected => (
-                StatusCode::FORBIDDEN,
-                "检测到异常请求，已拒绝".to_string(),
-            ),
+            AppError::InjectionDetected => {
+                (StatusCode::FORBIDDEN, "检测到异常请求，已拒绝".to_string())
+            }
             AppError::Forbidden => (StatusCode::FORBIDDEN, "访问被拒绝".to_string()),
             AppError::RateLimited => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "请求过于频繁，请稍后再试".to_string(),
             ),
-            AppError::MethodNotAllowed => (StatusCode::METHOD_NOT_ALLOWED, "方法不允许".to_string()),
+            AppError::MethodNotAllowed => {
+                (StatusCode::METHOD_NOT_ALLOWED, "方法不允许".to_string())
+            }
             AppError::DecryptionFailed(e) => (StatusCode::BAD_REQUEST, format!("解密失败: {}", e)),
         };
         let body = Json(serde_json::json!({ "error": msg }));

@@ -46,12 +46,15 @@ impl CorsGuard {
 
         // 开发域名：仅当显式启用时允许 localhost 和 0.0.0.0 的任意端口
         if self.dev_localhost_bypass
-            && let Some(rest) = origin.strip_prefix("http://").or_else(|| origin.strip_prefix("https://")) {
-                let host = rest.split(':').next().unwrap_or(rest);
-                if host == "localhost" || host == "0.0.0.0" || host == "127.0.0.1" {
-                    return true;
-                }
+            && let Some(rest) = origin
+                .strip_prefix("http://")
+                .or_else(|| origin.strip_prefix("https://"))
+        {
+            let host = rest.split(':').next().unwrap_or(rest);
+            if host == "localhost" || host == "0.0.0.0" || host == "127.0.0.1" {
+                return true;
             }
+        }
         false
     }
 
@@ -82,10 +85,7 @@ impl CorsGuard {
                 "Access-Control-Allow-Headers".to_string(),
                 self.allowed_headers.clone(),
             ),
-            (
-                "Access-Control-Max-Age".to_string(),
-                self.max_age.clone(),
-            ),
+            ("Access-Control-Max-Age".to_string(), self.max_age.clone()),
         ];
 
         if self.allow_credentials {
@@ -173,7 +173,9 @@ mod tests {
         let result = g.handle_preflight("http://localhost:8080");
         assert!(result.is_some());
         let (_, headers) = result.unwrap();
-        let methods = headers.iter().find(|(k, _)| k == "Access-Control-Allow-Methods");
+        let methods = headers
+            .iter()
+            .find(|(k, _)| k == "Access-Control-Allow-Methods");
         assert!(methods.is_some());
     }
 
@@ -181,7 +183,9 @@ mod tests {
     fn test_credentials_header_when_enabled() {
         let g = make_guard(true);
         let headers = g.add_cors_headers("http://localhost:8080");
-        let creds = headers.iter().find(|(k, _)| k == "Access-Control-Allow-Credentials");
+        let creds = headers
+            .iter()
+            .find(|(k, _)| k == "Access-Control-Allow-Credentials");
         assert!(creds.is_some());
         assert_eq!(creds.unwrap().1, "true");
     }

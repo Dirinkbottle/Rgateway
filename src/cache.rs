@@ -77,7 +77,11 @@ impl Cache {
             idx.entry(tag.clone()).or_default().push(key.clone());
         }
         // 维护路径索引：提取 key 中的路径部分（去掉 query）
-        let path = key.split_once('?').map(|(p, _)| p).unwrap_or(&key).to_string();
+        let path = key
+            .split_once('?')
+            .map(|(p, _)| p)
+            .unwrap_or(&key)
+            .to_string();
         {
             let mut pidx = self.path_index.write().await;
             pidx.entry(path).or_default().push(key.clone());
@@ -89,9 +93,7 @@ impl Cache {
     pub async fn invalidate_by_path(&self, path: &str) {
         let keys_to_remove: Vec<String> = {
             let pidx = self.path_index.read().await;
-            pidx.get(path)
-                .cloned()
-                .unwrap_or_default()
+            pidx.get(path).cloned().unwrap_or_default()
         };
         for key in &keys_to_remove {
             self.store.invalidate(key).await;

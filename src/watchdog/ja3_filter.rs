@@ -82,11 +82,7 @@ impl Ja3Filter {
 
         for pattern in BLOCKED_UA_PATTERNS {
             if ua.to_lowercase().contains(&pattern.to_lowercase()) {
-                tracing::warn!(
-                    "JA3 过滤：检测到自动化工具 UA='{}', IP={}",
-                    ua,
-                    ip
-                );
+                tracing::warn!("JA3 过滤：检测到自动化工具 UA='{}', IP={}", ua, ip);
                 return Err(Ja3Error::SuspiciousFingerprint);
             }
         }
@@ -113,12 +109,13 @@ impl Ja3Filter {
     /// Cookie 挑战验证
     fn check_cookie(&self, headers: &HeaderMap, ip: IpAddr) -> Result<Option<String>, Ja3Error> {
         if let Some(cookie_header) = headers.get("cookie").and_then(|v| v.to_str().ok())
-            && let Some(token) = parse_cookie(cookie_header, "zfsg_token") {
-                let ip_hash = self.hash_ip(ip);
-                if self.verify_cookie_signature(&token, &ip_hash) {
-                    return Ok(None); // 有效 Cookie
-                }
+            && let Some(token) = parse_cookie(cookie_header, "zfsg_token")
+        {
+            let ip_hash = self.hash_ip(ip);
+            if self.verify_cookie_signature(&token, &ip_hash) {
+                return Ok(None); // 有效 Cookie
             }
+        }
         // 无有效 Cookie，签发新令牌
         let token = self.issue_cookie(ip);
         Ok(Some(token))
@@ -141,14 +138,13 @@ impl Ja3Filter {
         let ip_hash = self.hash_ip(ip);
         let payload = format!("{}:{}:{}", nonce_hex, timestamp, ip_hash);
 
-        let mut mac =
-            <HmacSha256 as Mac>::new_from_slice(&self.cookie_signing_key).expect("HMAC 密钥创建失败");
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(&self.cookie_signing_key)
+            .expect("HMAC 密钥创建失败");
         mac.update(payload.as_bytes());
         let sig = hex::encode(mac.finalize().into_bytes());
 
         let token = format!("{}.{}", payload, sig);
-        self.valid_cookies
-            .insert(token.clone(), Instant::now());
+        self.valid_cookies.insert(token.clone(), Instant::now());
 
         // 清理过期 Cookie
         self.cleanup_cookies();
@@ -175,16 +171,13 @@ impl Ja3Filter {
         let sig = &token[dot_pos + 1..];
 
         // 验证 HMAC 签名
-        let mut mac =
-            <HmacSha256 as Mac>::new_from_slice(&self.cookie_signing_key).expect("HMAC 密钥创建失败");
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(&self.cookie_signing_key)
+            .expect("HMAC 密钥创建失败");
         mac.update(payload.as_bytes());
         let expected_sig = hex::encode(mac.finalize().into_bytes());
 
         use subtle::ConstantTimeEq;
-        let eq: bool = sig
-            .as_bytes()
-            .ct_eq(expected_sig.as_bytes())
-            .into();
+        let eq: bool = sig.as_bytes().ct_eq(expected_sig.as_bytes()).into();
         if !eq {
             return false;
         }
@@ -193,10 +186,7 @@ impl Ja3Filter {
         let parts: Vec<&str> = payload.splitn(3, ':').collect();
         if parts.len() == 3 {
             // 新格式：检查 IP 哈希
-            let eq_ip: bool = parts[2]
-                .as_bytes()
-                .ct_eq(ip_hash.as_bytes())
-                .into();
+            let eq_ip: bool = parts[2].as_bytes().ct_eq(ip_hash.as_bytes()).into();
             if !eq_ip {
                 return false;
             }
@@ -224,9 +214,10 @@ fn parse_cookie(cookie_header: &str, name: &str) -> Option<String> {
     for part in cookie_header.split(';') {
         let part = part.trim();
         if let Some((k, v)) = part.split_once('=')
-            && k.trim() == name {
-                return Some(v.trim().to_string());
-            }
+            && k.trim() == name
+        {
+            return Some(v.trim().to_string());
+        }
     }
     None
 }

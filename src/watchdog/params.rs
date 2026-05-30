@@ -104,12 +104,13 @@ impl ParamValidator {
                 match val {
                     Some(v) => {
                         if let Some(ref allowed) = field_rule.values
-                            && !allowed.iter().any(|a| a.eq_ignore_ascii_case(v)) {
-                                return ParamCheckResult::InvalidParam(format!(
-                                    "Header '{}' 值不允许: '{}'",
-                                    key, v
-                                ));
-                            }
+                            && !allowed.iter().any(|a| a.eq_ignore_ascii_case(v))
+                        {
+                            return ParamCheckResult::InvalidParam(format!(
+                                "Header '{}' 值不允许: '{}'",
+                                key, v
+                            ));
+                        }
                     }
                     None if field_rule.required.unwrap_or(false) => {
                         return ParamCheckResult::InvalidParam(format!(
@@ -193,15 +194,17 @@ fn parse_query(query: &str) -> HashMap<&str, &str> {
 fn validate_field_value(value: &str, rule: &FieldRule) -> Result<(), String> {
     // 长度校验
     if let Some(max_len) = rule.max_len
-        && value.len() > max_len {
-            return Err(format!("长度 {} 超过限制 {}", value.len(), max_len));
-        }
+        && value.len() > max_len
+    {
+        return Err(format!("长度 {} 超过限制 {}", value.len(), max_len));
+    }
 
     // 值白名单校验
     if let Some(ref allowed) = rule.values
-        && !allowed.iter().any(|a| a == value) {
-            return Err(format!("值 '{}' 不在允许列表中", value));
-        }
+        && !allowed.iter().any(|a| a == value)
+    {
+        return Err(format!("值 '{}' 不在允许列表中", value));
+    }
 
     // 类型校验
     match rule.field_type.as_deref() {
@@ -221,8 +224,8 @@ fn validate_field_value(value: &str, rule: &FieldRule) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::watchdog::config::{
-        FieldRule, ParamsConfig, Rule, WatchdogConfig, CorsConfig,
-        CryptoConfig, RateLimitConfig, NetworkConfig,
+        CorsConfig, CryptoConfig, FieldRule, NetworkConfig, ParamsConfig, RateLimitConfig, Rule,
+        WatchdogConfig,
     };
     use crate::watchdog::matcher::RuleBuckets;
     use axum::http::{HeaderMap, Method};
@@ -319,7 +322,13 @@ mod tests {
     fn test_valid_params_pass() {
         let v = validator(vec![sites_rule()]);
         let headers = HeaderMap::new();
-        let result = v.validate(&Method::GET, "/api/sites", "category=news&page=1", &headers, &[]);
+        let result = v.validate(
+            &Method::GET,
+            "/api/sites",
+            "category=news&page=1",
+            &headers,
+            &[],
+        );
         assert!(matches!(result, ParamCheckResult::Ok));
     }
 
@@ -415,7 +424,9 @@ mod tests {
         let v = validator(vec![rule_with_body()]);
         let headers = HeaderMap::new();
         let result = v.validate(&Method::POST, "/api/items", "", &headers, b"[1,2,3]");
-        assert!(matches!(result, ParamCheckResult::InvalidParam(ref msg) if msg.contains("JSON 对象")));
+        assert!(
+            matches!(result, ParamCheckResult::InvalidParam(ref msg) if msg.contains("JSON 对象"))
+        );
     }
 
     #[test]
@@ -423,14 +434,22 @@ mod tests {
         let v = validator(vec![rule_with_body()]);
         let headers = HeaderMap::new();
         let result = v.validate(&Method::POST, "/api/items", "", &headers, b"\"hello\"");
-        assert!(matches!(result, ParamCheckResult::InvalidParam(ref msg) if msg.contains("JSON 对象")));
+        assert!(
+            matches!(result, ParamCheckResult::InvalidParam(ref msg) if msg.contains("JSON 对象"))
+        );
     }
 
     #[test]
     fn test_body_valid_json_passes() {
         let v = validator(vec![rule_with_body()]);
         let headers = HeaderMap::new();
-        let result = v.validate(&Method::POST, "/api/items", "", &headers, br#"{"name":"test"}"#);
+        let result = v.validate(
+            &Method::POST,
+            "/api/items",
+            "",
+            &headers,
+            br#"{"name":"test"}"#,
+        );
         assert!(matches!(result, ParamCheckResult::Ok));
     }
 
@@ -448,7 +467,13 @@ mod tests {
     fn test_body_required_field_missing_rejected() {
         let v = validator(vec![rule_with_body()]);
         let headers = HeaderMap::new();
-        let result = v.validate(&Method::POST, "/api/items", "", &headers, br#"{"other":"value"}"#);
+        let result = v.validate(
+            &Method::POST,
+            "/api/items",
+            "",
+            &headers,
+            br#"{"other":"value"}"#,
+        );
         assert!(matches!(result, ParamCheckResult::InvalidParam(ref msg) if msg.contains("name")));
     }
 }
