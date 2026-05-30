@@ -26,6 +26,7 @@ fn should_strip_header(name: &str) -> bool {
 }
 
 /// 代理响应（已剥离网关内部控制头）
+#[allow(dead_code)]
 pub struct ProxyResponse {
     pub status: StatusCode,
     pub headers: Vec<(String, String)>,

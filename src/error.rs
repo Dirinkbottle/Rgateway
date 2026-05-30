@@ -5,6 +5,7 @@ use axum::{
 };
 
 /// 网关统一错误类型
+#[allow(dead_code)]
 pub enum AppError {
     /// 后端不可达
     BackendUnreachable(String),

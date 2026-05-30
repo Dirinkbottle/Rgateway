@@ -12,6 +12,7 @@ use tokio::sync::RwLock;
 
 /// 缓存的 HTTP 响应
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct CachedResponse {
     pub status: StatusCode,
     pub headers: Vec<(String, String)>,
@@ -31,15 +32,19 @@ pub struct CacheStats {
 pub struct Cache {
     store: MokaCache<String, CachedResponse>,
     tag_index: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    /// 路径 → 缓存 key 映射（支持按路径前缀批量失效）
+    path_index: Arc<RwLock<HashMap<String, Vec<String>>>>,
     hits: AtomicU64,
     misses: AtomicU64,
 }
 
+#[allow(dead_code)]
 impl Cache {
     pub fn new(max_entries: u64) -> Self {
         Self {
             store: MokaCache::new(max_entries),
             tag_index: Arc::new(RwLock::new(HashMap::new())),
+            path_index: Arc::new(RwLock::new(HashMap::new())),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
         }
@@ -71,11 +76,29 @@ impl Cache {
             let mut idx = self.tag_index.write().await;
             idx.entry(tag.clone()).or_default().push(key.clone());
         }
+        // 维护路径索引：提取 key 中的路径部分（去掉 query）
+        let path = key.split_once('?').map(|(p, _)| p).unwrap_or(&key).to_string();
+        {
+            let mut pidx = self.path_index.write().await;
+            pidx.entry(path).or_default().push(key.clone());
+        }
         self.store.insert(key, resp).await;
     }
 
-    /// 按路径精确失效
+    /// 按路径前缀失效（精确路径 + 所有带 query 的变体）
     pub async fn invalidate_by_path(&self, path: &str) {
+        let keys_to_remove: Vec<String> = {
+            let pidx = self.path_index.read().await;
+            pidx.get(path)
+                .cloned()
+                .unwrap_or_default()
+        };
+        for key in &keys_to_remove {
+            self.store.invalidate(key).await;
+        }
+        // 从路径索引中移除
+        self.path_index.write().await.remove(path);
+        // 精确 key 也尝试失效（兼容未索引的情况）
         self.store.invalidate(path).await;
     }
 
@@ -93,6 +116,7 @@ impl Cache {
     pub async fn clear(&self) {
         self.store.invalidate_all();
         self.tag_index.write().await.clear();
+        self.path_index.write().await.clear();
     }
 
     /// 缓存统计
@@ -105,6 +129,7 @@ impl Cache {
     }
 }
 
+#[allow(dead_code)]
 impl CachedResponse {
     /// 从后端响应构造，计算过期时间
     pub fn new(

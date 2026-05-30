@@ -123,35 +123,56 @@ impl ParamValidator {
         }
 
         // 6. Body 校验（JSON）
-        if let Some(ref body_rules) = rule.params.body
-            && let Ok(body_str) = std::str::from_utf8(body)
-                && let Ok(body_json) =
-                    serde_json::from_str::<HashMap<String, serde_json::Value>>(body_str)
-                {
-                    for (key, field_rule) in body_rules {
-                        match body_json.get(key.as_str()) {
-                            Some(val) => {
-                                let val_str = match val {
-                                    serde_json::Value::String(s) => s.clone(),
-                                    other => other.to_string(),
-                                };
-                                if let Err(e) = validate_field_value(&val_str, field_rule) {
-                                    return ParamCheckResult::InvalidParam(format!(
-                                        "Body 字段 '{}' 校验失败: {}",
-                                        key, e
-                                    ));
-                                }
-                            }
-                            None if field_rule.required.unwrap_or(false) => {
+        if let Some(ref body_rules) = rule.params.body {
+            // 有 body 规则时，非空 body 必须是合法 UTF-8 + JSON 对象
+            if !body.is_empty() {
+                let body_str = match std::str::from_utf8(body) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        return ParamCheckResult::InvalidParam(
+                            "Body 不是合法的 UTF-8 编码".to_string(),
+                        );
+                    }
+                };
+                let body_json: HashMap<String, serde_json::Value> =
+                    match serde_json::from_str(body_str) {
+                        Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
+                        Ok(_) => {
+                            return ParamCheckResult::InvalidParam(
+                                "Body 必须是 JSON 对象".to_string(),
+                            );
+                        }
+                        Err(_) => {
+                            return ParamCheckResult::InvalidParam(
+                                "Body 不是合法的 JSON".to_string(),
+                            );
+                        }
+                    };
+                for (key, field_rule) in body_rules {
+                    match body_json.get(key.as_str()) {
+                        Some(val) => {
+                            let val_str = match val {
+                                serde_json::Value::String(s) => s.clone(),
+                                other => other.to_string(),
+                            };
+                            if let Err(e) = validate_field_value(&val_str, field_rule) {
                                 return ParamCheckResult::InvalidParam(format!(
-                                    "缺少必需的 Body 字段: '{}'",
-                                    key
+                                    "Body 字段 '{}' 校验失败: {}",
+                                    key, e
                                 ));
                             }
-                            _ => {}
                         }
+                        None if field_rule.required.unwrap_or(false) => {
+                            return ParamCheckResult::InvalidParam(format!(
+                                "缺少必需的 Body 字段: '{}'",
+                                key
+                            ));
+                        }
+                        _ => {}
                     }
                 }
+            }
+        }
 
         ParamCheckResult::Ok
     }
@@ -215,13 +236,15 @@ mod tests {
                 allowed_headers: vec![],
                 max_age: 3600,
                 allow_credentials: false,
+                dev_localhost_bypass: false,
             },
             crypto: CryptoConfig {
-                hash_key_hex: "0".repeat(64),
                 max_nonce_jump: 10,
                 session_timeout_secs: 300,
                 challenge_timeout_secs: 60,
                 min_request_interval_ms: 10,
+                bootstrap_token_ttl_secs: 60,
+                bootstrap_rate_limit_per_min: 5,
             },
             rate_limit: RateLimitConfig {
                 default_rps: 50,
@@ -234,6 +257,8 @@ mod tests {
                 cookie_challenge_enabled: false,
             },
             rules,
+            reject_unknown_fields: false,
+            reject_unknown_query: false,
         }
     }
 
@@ -339,5 +364,91 @@ mod tests {
         let headers = HeaderMap::new();
         let result = v.validate(&Method::GET, "/api/sites", "page=abc", &headers, &[]);
         assert!(matches!(result, ParamCheckResult::InvalidParam(_)));
+    }
+
+    // === Body 校验测试 ===
+
+    fn rule_with_body() -> Rule {
+        let mut body = std::collections::HashMap::new();
+        body.insert(
+            "name".to_string(),
+            FieldRule {
+                field_type: Some("string".to_string()),
+                required: Some(true),
+                max_len: Some(100),
+                values: None,
+            },
+        );
+        Rule {
+            id: "create-item".to_string(),
+            path: "/api/items".to_string(),
+            methods: vec!["POST".to_string()],
+            params: ParamsConfig {
+                query: None,
+                headers: None,
+                body: Some(body),
+            },
+            rate_limit: None,
+        }
+    }
+
+    #[test]
+    fn test_body_invalid_utf8_rejected() {
+        let v = validator(vec![rule_with_body()]);
+        let headers = HeaderMap::new();
+        // 非法 UTF-8 字节
+        let bad_body: &[u8] = &[0xFF, 0xFE, 0x00, 0x01];
+        let result = v.validate(&Method::POST, "/api/items", "", &headers, bad_body);
+        assert!(matches!(result, ParamCheckResult::InvalidParam(ref msg) if msg.contains("UTF-8")));
+    }
+
+    #[test]
+    fn test_body_invalid_json_rejected() {
+        let v = validator(vec![rule_with_body()]);
+        let headers = HeaderMap::new();
+        let result = v.validate(&Method::POST, "/api/items", "", &headers, b"not json {{{");
+        assert!(matches!(result, ParamCheckResult::InvalidParam(ref msg) if msg.contains("JSON")));
+    }
+
+    #[test]
+    fn test_body_json_array_rejected() {
+        let v = validator(vec![rule_with_body()]);
+        let headers = HeaderMap::new();
+        let result = v.validate(&Method::POST, "/api/items", "", &headers, b"[1,2,3]");
+        assert!(matches!(result, ParamCheckResult::InvalidParam(ref msg) if msg.contains("JSON 对象")));
+    }
+
+    #[test]
+    fn test_body_json_string_rejected() {
+        let v = validator(vec![rule_with_body()]);
+        let headers = HeaderMap::new();
+        let result = v.validate(&Method::POST, "/api/items", "", &headers, b"\"hello\"");
+        assert!(matches!(result, ParamCheckResult::InvalidParam(ref msg) if msg.contains("JSON 对象")));
+    }
+
+    #[test]
+    fn test_body_valid_json_passes() {
+        let v = validator(vec![rule_with_body()]);
+        let headers = HeaderMap::new();
+        let result = v.validate(&Method::POST, "/api/items", "", &headers, br#"{"name":"test"}"#);
+        assert!(matches!(result, ParamCheckResult::Ok));
+    }
+
+    #[test]
+    fn test_body_empty_passes_when_rules_exist() {
+        let v = validator(vec![rule_with_body()]);
+        let headers = HeaderMap::new();
+        // 空 body 跳过校验（GET 类似场景），但 name 是 required
+        // 空 body 时不会触发 body 校验（因为 body.is_empty()）
+        let result = v.validate(&Method::POST, "/api/items", "", &headers, &[]);
+        assert!(matches!(result, ParamCheckResult::Ok));
+    }
+
+    #[test]
+    fn test_body_required_field_missing_rejected() {
+        let v = validator(vec![rule_with_body()]);
+        let headers = HeaderMap::new();
+        let result = v.validate(&Method::POST, "/api/items", "", &headers, br#"{"other":"value"}"#);
+        assert!(matches!(result, ParamCheckResult::InvalidParam(ref msg) if msg.contains("name")));
     }
 }

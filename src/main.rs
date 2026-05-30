@@ -1,6 +1,7 @@
 mod cache;
 mod config;
 mod error;
+mod log_redact;
 mod proxy;
 mod routes;
 mod watchdog;

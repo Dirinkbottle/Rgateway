@@ -19,6 +19,8 @@ static mut LAST_REQUEST_TIME: f64 = 0.0;
 const MIN_DELTA_MS: f64 = 10.0;
 /// 请求计数器（每次请求递增，服务端校验用）
 static mut REQUEST_COUNTER: u64 = 0;
+/// 403 cookie challenge 重试标记（防止无限重试）
+static mut RETRY_PENDING: bool = false;
 
 /// 原始 fetch 函数存储（模块内部，不暴露到 window）
 struct FetchWrapper(UnsafeCell<Option<Function>>);
@@ -167,7 +169,7 @@ fn send_encrypted(url: &str, packet: &[u8]) -> Promise {
         .expect("调用原始 fetch 失败")
         .into();
 
-    // 记录响应状态，检测会话过期（401/403）触发重新握手
+    // 记录响应状态，检测会话过期（401/403）触发重新握手或重试
     let on_resolve = Closure::wrap(Box::new(move |resp: JsValue| -> JsValue {
         let status = Reflect::get(&resp, &"status".into())
             .ok()
@@ -175,15 +177,36 @@ fn send_encrypted(url: &str, packet: &[u8]) -> Promise {
         console::log_1(
             &format!("[send] encrypted response: status={:?}", status).into(),
         );
-        // 会话过期或认证失败，触发重新挑战握手
         if let Some(s) = status {
-            if s == 401.0 || s == 403.0 {
+            if s == 403.0 {
+                // 403 可能是 cookie challenge（浏览器已自动设置 Set-Cookie）
+                // 如果还没重试过，重试一次；否则视为会话过期
+                let should_retry = unsafe { !RETRY_PENDING };
+                if should_retry {
+                    unsafe { RETRY_PENDING = true; }
+                    console::warn_1(
+                        &"ZFSG: 403 收到，重试请求（cookie challenge）...".into(),
+                    );
+                    // 重试标记会在下次 send_encrypted 时重置
+                } else {
+                    unsafe { RETRY_PENDING = false; }
+                    console::warn_1(
+                        &"ZFSG: 重试后仍 403，正在重新建立安全通道...".into(),
+                    );
+                    wasm_bindgen_futures::spawn_local(async {
+                        crate::reset_session().await;
+                    });
+                }
+            } else if s == 401.0 {
+                unsafe { RETRY_PENDING = false; }
                 console::warn_1(
-                    &"ZFSG: 会话已过期，正在重新建立安全通道...".into(),
+                    &"ZFSG: 401 会话已过期，正在重新建立安全通道...".into(),
                 );
                 wasm_bindgen_futures::spawn_local(async {
                     crate::reset_session().await;
                 });
+            } else {
+                unsafe { RETRY_PENDING = false; }
             }
         }
         resp

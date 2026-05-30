@@ -2,6 +2,7 @@ use std::time::Duration;
 
 /// 网关配置，从 .env 文件和环境变量读取
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct Config {
     /// Go 后端地址
     pub backend_url: String,
@@ -17,6 +18,8 @@ pub struct Config {
     pub watchdog_config_path: String,
     /// Admin API Bearer Token（为空则不鉴权，仅限开发环境）
     pub admin_token: String,
+    /// 是否允许无鉴权的管理接口（仅限开发环境，生产必须为 false）
+    pub dev_allow_insecure_admin: bool,
 }
 
 const THREE_DAYS: u64 = 259200;
@@ -36,6 +39,9 @@ impl Config {
             watchdog_config_path: std::env::var("WATCHDOG_CONFIG_PATH")
                 .unwrap_or_else(|_| "watchdog.json".into()),
             admin_token: std::env::var("ADMIN_TOKEN").unwrap_or_default(),
+            dev_allow_insecure_admin: std::env::var("DEV_ALLOW_INSECURE_ADMIN")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false),
         }
     }
 }

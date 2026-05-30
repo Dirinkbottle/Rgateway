@@ -109,18 +109,22 @@ fetch('/api/sites')
 | --------------------------- | -------------------------------- | ---- |
 | `/gateway/watchdogbody`     | 下载 WASM 二进制模块             | GET  |
 | `/gateway/watchdogheader`   | 下载 JS 胶水代码                 | GET  |
-| `/gateway/challenge`        | 请求挑战（握手第一步）           | POST |
+| `/gateway/bootstrap`        | 签发短期 bootstrap token         | POST |
+| `/gateway/challenge`        | 请求挑战（握手第二步）           | POST |
 | `/gateway/challenge/verify` | 验证挑战、获取临时密钥           | POST |
 | `/gateway/encrypted_relay`  | 加密请求中继（所有加密流量入口） | POST |
+| `/health`                   | 健康检查                         | GET  |
 
 ### 安全特性（自动生效）
 
+- **Bootstrap Token 模式** — 客户端不再内置长期密钥，改为服务端签发短期一次性 token
 - **AES-256-GCM 加密** — 每个请求使用独立密钥（HKDF 从临时密钥 + 滚动码派生）
 - **防重放** — 严格递增的请求计数器 + 时间戳校验
 - **防自动化** — 滚动码固定步长 + 最小请求间隔（clock fuse < 10ms 触发脏包）
 - **防篡改** — HMAC-SHA256 MAC 验证，常量时间比较
-- **会话隔离** — 每次握手签发独立临时密钥，内置密钥不直接用于加密
-- **IP 绑定** — 挑战与客户端 IP 绑定，防止跨 IP 劫持
+- **会话隔离** — 每次握手签发独立临时密钥
+- **IP 绑定** — bootstrap token、挑战、会话均与客户端 IP 绑定
+- **Cookie 挑战** — 缺少有效 cookie 时返回 403 + Set-Cookie，携带 cookie 后重试
 
 ---
 
@@ -151,114 +155,20 @@ cargo run --release
 
 ---
 
-### 一、公开网关（端口 3000）
+### 一、缓存管理 API（端口 3001，仅 127.0.0.1）
 
-所有 `/api/*` 请求透明代理到 Go 后端，浏览器无感知。
+管理接口需要 Bearer Token 鉴权（`ADMIN_TOKEN` 环境变量）。生产环境必须设置 `ADMIN_TOKEN`。
 
-#### GET /api/* — 读操作（带缓存）
+#### GET / 或 /admin
 
-```
-GET /api/sites
-GET /api/sites?category=tech
-GET /api/sites/123
-```
-
-**行为：** 缓存命中直接返回，未命中转发后端并缓存。
-
-**响应头（浏览器可见）：**
-
-| 头 | 值 | 说明 |
-|---|------|------|
-| `X-Cache` | `HIT` / `MISS` | 本次是否命中缓存 |
-
-#### POST/PUT/DELETE /api/* — 写操作（穿透）
-
-```
-POST /api/sites
-PUT /api/sites/123
-DELETE /api/sites/123
-```
-
-**行为：** 不查缓存、不写缓存，直接转发后端。
-
-#### GET /health
-
-返回 `ok`，用于健康检查。
-
----
-
-### 二、后端响应头约定
-
-Go 后端可通过以下响应头控制缓存行为，**这些头不会暴露给浏览器**（网关会剥离）。
-
-| 响应头 | 示例 | 说明 |
-|--------|------|------|
-| `X-Cache-TTL` | `60` | 本条缓存 TTL（秒），覆盖默认 3 天。适合变化较快的接口 |
-| `X-Cache-Skip` | `1` | 本次响应不缓存。适合用户相关数据、实时数据 |
-| `X-Cache-Tag` | `sites` | 缓存标签，用于后续批量失效 |
-
-**典型使用场景：**
-
-```
-# Go 后端伪代码
-
-// 站点列表 — 变化少，走默认 3 天缓存，打标签方便后续失效
-GET /api/sites
-  → 不设任何头，默认缓存 3 天
-  → 设置 X-Cache-Tag: sites
-
-// 用户信息 — 每个用户不同，跳过缓存
-GET /api/user/me
-  → X-Cache-Skip: 1
-
-// 实时统计 — 变化快，缓存 10 秒
-GET /api/stats
-  → X-Cache-TTL: 10
-```
-
----
-
-### 三、缓存管理 API（端口 3001，仅 127.0.0.1）
-
-供 Go 后端在数据变更时主动失效缓存。
-
-#### POST /__gateway/invalidate
-
-按标签或路径失效缓存。
-
-```bash
-# 按标签批量失效（推荐）
-curl -X POST 127.0.0.1:3001/__gateway/invalidate \
-  -H "Content-Type: application/json" \
-  -d '{"tag":"sites"}'
-
-# 按精确路径失效
-curl -X POST 127.0.0.1:3001/__gateway/invalidate \
-  -H "Content-Type: application/json" \
-  -d '{"path":"/api/sites"}'
-```
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `tag` | string | 按标签失效，匹配 `X-Cache-Tag` |
-| `path` | string | 按路径失效，需完全匹配 |
-
-两个字段二选一，`tag` 优先。
-
-#### DELETE /__gateway/cache
-
-清空全部缓存。
-
-```bash
-curl -X DELETE 127.0.0.1:3001/__gateway/cache
-```
+管理面板（Web UI），提供缓存统计、按标签/路径失效、清空缓存功能。
 
 #### GET /__gateway/stats
 
 缓存统计。
 
 ```bash
-curl 127.0.0.1:3001/__gateway/stats
+curl -H "Authorization: Bearer YOUR_TOKEN" 127.0.0.1:3001/__gateway/stats
 ```
 
 响应：
@@ -276,6 +186,39 @@ curl 127.0.0.1:3001/__gateway/stats
 | `entries` | 当前缓存条目数 |
 | `hits` | 累计命中次数 |
 | `misses` | 累计未命中次数 |
+
+#### POST /__gateway/invalidate
+
+按标签或路径失效缓存（路径前缀匹配，自动清除带 query 的变体）。
+
+```bash
+# 按标签批量失效（推荐）
+curl -X POST 127.0.0.1:3001/__gateway/invalidate \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"tag":"sites"}'
+
+# 按路径失效（前缀匹配）
+curl -X POST 127.0.0.1:3001/__gateway/invalidate \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"path":"/api/sites"}'
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `tag` | string | 按标签失效，匹配 `X-Cache-Tag` |
+| `path` | string | 按路径失效，前缀匹配（含 query 变体） |
+
+两个字段二选一，`tag` 优先。
+
+#### DELETE /__gateway/cache
+
+清空全部缓存。
+
+```bash
+curl -X DELETE -H "Authorization: Bearer YOUR_TOKEN" 127.0.0.1:3001/__gateway/cache
+```
 
 ---
 

@@ -118,7 +118,7 @@ impl Decryptor {
             return false;
         }
         let delta = current.wrapping_sub(prev);
-        if delta % nonce_step != 0 {
+        if !delta.is_multiple_of(nonce_step) {
             return false;
         }
         let jumps = delta / nonce_step;
@@ -240,8 +240,8 @@ impl Decryptor {
         }
 
         // 滚动码校验
-        if session.rolling_nonce > 0 {
-            if !self.is_valid_forward_progress(
+        if session.rolling_nonce > 0
+            && !self.is_valid_forward_progress(
                 session.rolling_nonce,
                 rolling_nonce,
                 session.nonce_step,
@@ -255,7 +255,6 @@ impl Decryptor {
                 );
                 return Err(DecryptError::DecryptionFailed);
             }
-        }
 
         // 防重放：时间戳必须严格递增
         if timestamp <= session.last_timestamp {
@@ -350,9 +349,11 @@ mod tests {
 
     /// 创建一个已建立会话的 Decryptor，返回 (decryptor, session_id, ephemeral_key)
     fn setup_session() -> (Decryptor, String, [u8; 32]) {
-        let cm = Arc::new(ChallengeManager::new([1u8; 32], 60, 300, 0));
-        let (cid, challenge) = cm.create_challenge(ip()).unwrap();
-        let mut mac = <HmacSha256 as Mac>::new_from_slice(&[1u8; 32]).unwrap();
+        let cm = Arc::new(ChallengeManager::new(60, 300, 0, 60, 100));
+        let bootstrap_hex = cm.create_bootstrap_token(ip()).unwrap();
+        let (cid, challenge) = cm.create_challenge(ip(), &bootstrap_hex).unwrap();
+        let bootstrap_bytes = hex::decode(&bootstrap_hex).unwrap();
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(&bootstrap_bytes).unwrap();
         mac.update(&challenge);
         let hmac = mac.finalize().into_bytes();
         let (sid, ekey) = cm.verify_and_create_session(&cid, &hmac, ip()).unwrap();
@@ -431,9 +432,11 @@ mod tests {
 
     #[test]
     fn test_valid_packet_decrypts_correctly() {
-        let cm = Arc::new(ChallengeManager::new([1u8; 32], 60, 300, 0));
-        let (cid, challenge) = cm.create_challenge(ip()).unwrap();
-        let mut mac = <HmacSha256 as Mac>::new_from_slice(&[1u8; 32]).unwrap();
+        let cm = Arc::new(ChallengeManager::new(60, 300, 0, 60, 100));
+        let bootstrap_hex = cm.create_bootstrap_token(ip()).unwrap();
+        let (cid, challenge) = cm.create_challenge(ip(), &bootstrap_hex).unwrap();
+        let bootstrap_bytes = hex::decode(&bootstrap_hex).unwrap();
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(&bootstrap_bytes).unwrap();
         mac.update(&challenge);
         let hmac_bytes = mac.finalize().into_bytes();
         let (sid, ekey) = cm.verify_and_create_session(&cid, &hmac_bytes, ip()).unwrap();
@@ -452,9 +455,11 @@ mod tests {
 
     #[test]
     fn test_tampered_mac_rejected() {
-        let cm = Arc::new(ChallengeManager::new([1u8; 32], 60, 300, 0));
-        let (cid, challenge) = cm.create_challenge(ip()).unwrap();
-        let mut mac = <HmacSha256 as Mac>::new_from_slice(&[1u8; 32]).unwrap();
+        let cm = Arc::new(ChallengeManager::new(60, 300, 0, 60, 100));
+        let bootstrap_hex = cm.create_bootstrap_token(ip()).unwrap();
+        let (cid, challenge) = cm.create_challenge(ip(), &bootstrap_hex).unwrap();
+        let bootstrap_bytes = hex::decode(&bootstrap_hex).unwrap();
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(&bootstrap_bytes).unwrap();
         mac.update(&challenge);
         let hmac_bytes = mac.finalize().into_bytes();
         let (sid, ekey) = cm.verify_and_create_session(&cid, &hmac_bytes, ip()).unwrap();
@@ -480,9 +485,11 @@ mod tests {
 
     #[test]
     fn test_counter_mismatch_rejected() {
-        let cm = Arc::new(ChallengeManager::new([1u8; 32], 60, 300, 0));
-        let (cid, challenge) = cm.create_challenge(ip()).unwrap();
-        let mut mac = <HmacSha256 as Mac>::new_from_slice(&[1u8; 32]).unwrap();
+        let cm = Arc::new(ChallengeManager::new(60, 300, 0, 60, 100));
+        let bootstrap_hex = cm.create_bootstrap_token(ip()).unwrap();
+        let (cid, challenge) = cm.create_challenge(ip(), &bootstrap_hex).unwrap();
+        let bootstrap_bytes = hex::decode(&bootstrap_hex).unwrap();
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(&bootstrap_bytes).unwrap();
         mac.update(&challenge);
         let hmac_bytes = mac.finalize().into_bytes();
         let (sid, ekey) = cm.verify_and_create_session(&cid, &hmac_bytes, ip()).unwrap();
@@ -510,9 +517,11 @@ mod tests {
 
     #[test]
     fn test_sequential_requests_succeed() {
-        let cm = Arc::new(ChallengeManager::new([1u8; 32], 60, 300, 0));
-        let (cid, challenge) = cm.create_challenge(ip()).unwrap();
-        let mut mac = <HmacSha256 as Mac>::new_from_slice(&[1u8; 32]).unwrap();
+        let cm = Arc::new(ChallengeManager::new(60, 300, 0, 60, 100));
+        let bootstrap_hex = cm.create_bootstrap_token(ip()).unwrap();
+        let (cid, challenge) = cm.create_challenge(ip(), &bootstrap_hex).unwrap();
+        let bootstrap_bytes = hex::decode(&bootstrap_hex).unwrap();
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(&bootstrap_bytes).unwrap();
         mac.update(&challenge);
         let hmac_bytes = mac.finalize().into_bytes();
         let (sid, ekey) = cm.verify_and_create_session(&cid, &hmac_bytes, ip()).unwrap();

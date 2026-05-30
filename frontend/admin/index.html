@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ZFSG 管理面板</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #0f172a; color: #e2e8f0; min-height: 100vh;
+        }
+        header {
+            background: #1e293b; border-bottom: 1px solid #334155;
+            padding: 1rem 2rem; display: flex; align-items: center; justify-content: space-between;
+        }
+        header h1 { font-size: 1.25rem; color: #38bdf8; }
+        .auth-section { display: flex; gap: 0.5rem; align-items: center; }
+        .auth-section input {
+            background: #0f172a; border: 1px solid #475569; color: #e2e8f0;
+            padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.875rem; width: 280px;
+        }
+        .auth-section input:focus { outline: none; border-color: #38bdf8; }
+        .btn {
+            padding: 0.5rem 1rem; border: none; border-radius: 6px; cursor: pointer;
+            font-size: 0.875rem; font-weight: 500; transition: background 0.15s;
+        }
+        .btn-primary { background: #2563eb; color: white; }
+        .btn-primary:hover { background: #1d4ed8; }
+        .btn-danger { background: #dc2626; color: white; }
+        .btn-danger:hover { background: #b91c1c; }
+        .btn-secondary { background: #475569; color: white; }
+        .btn-secondary:hover { background: #334155; }
+        .container {
+            max-width: 960px; margin: 2rem auto; padding: 0 1rem;
+            display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem;
+        }
+        @media (max-width: 640px) { .container { grid-template-columns: 1fr; } }
+        .card {
+            background: #1e293b; border: 1px solid #334155; border-radius: 8px;
+            padding: 1.25rem;
+        }
+        .card h2 { font-size: 1rem; color: #94a3b8; margin-bottom: 1rem; }
+        .stat-row { display: flex; justify-content: space-between; padding: 0.4rem 0; }
+        .stat-label { color: #94a3b8; }
+        .stat-value { color: #38bdf8; font-weight: 600; font-variant-numeric: tabular-nums; }
+        .form-group { margin-bottom: 0.75rem; }
+        .form-group label { display: block; color: #94a3b8; font-size: 0.8rem; margin-bottom: 0.25rem; }
+        .form-group input {
+            width: 100%; background: #0f172a; border: 1px solid #475569; color: #e2e8f0;
+            padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.875rem;
+        }
+        .form-group input:focus { outline: none; border-color: #38bdf8; }
+        .btn-row { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
+        .log-area {
+            grid-column: 1 / -1; background: #0f172a; border: 1px solid #334155;
+            border-radius: 8px; padding: 1rem; max-height: 300px; overflow-y: auto;
+            font-family: "SF Mono", "Fira Code", monospace; font-size: 0.8rem;
+        }
+        .log-entry { padding: 0.2rem 0; border-bottom: 1px solid #1e293b; }
+        .log-entry .time { color: #64748b; }
+        .log-entry .msg { color: #cbd5e1; }
+        .log-entry.error .msg { color: #f87171; }
+        .log-entry.success .msg { color: #4ade80; }
+        .status-dot {
+            display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+            margin-right: 0.5rem;
+        }
+        .status-dot.ok { background: #4ade80; }
+        .status-dot.err { background: #f87171; }
+        .status-dot.loading { background: #facc15; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>🛡️ ZFSG 管理面板</h1>
+        <div class="auth-section">
+            <input type="password" id="tokenInput" placeholder="Admin Bearer Token" autocomplete="off">
+            <button class="btn btn-primary" onclick="connect()">连接</button>
+        </div>
+    </header>
+
+    <div class="container">
+        <!-- 健康状态 -->
+        <div class="card">
+            <h2><span class="status-dot" id="healthDot"></span>网关状态</h2>
+            <div id="healthStatus">未连接</div>
+            <div style="margin-top:0.75rem">
+                <div class="stat-row">
+                    <span class="stat-label">缓存条目</span>
+                    <span class="stat-value" id="statEntries">—</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">命中次数</span>
+                    <span class="stat-value" id="statHits">—</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">未命中次数</span>
+                    <span class="stat-value" id="statMisses">—</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">命中率</span>
+                    <span class="stat-value" id="statHitRate">—</span>
+                </div>
+            </div>
+            <div class="btn-row">
+                <button class="btn btn-secondary" onclick="refreshStats()">刷新</button>
+            </div>
+        </div>
+
+        <!-- 缓存操作 -->
+        <div class="card">
+            <h2>缓存管理</h2>
+            <div class="form-group">
+                <label>按标签失效</label>
+                <input type="text" id="tagInput" placeholder="例如: sites">
+            </div>
+            <div class="btn-row">
+                <button class="btn btn-secondary" onclick="invalidateByTag()">按标签失效</button>
+            </div>
+            <div class="form-group" style="margin-top:1rem">
+                <label>按路径失效</label>
+                <input type="text" id="pathInput" placeholder="例如: /api/sites">
+            </div>
+            <div class="btn-row">
+                <button class="btn btn-secondary" onclick="invalidateByPath()">按路径失效</button>
+            </div>
+            <div class="btn-row" style="margin-top:1rem">
+                <button class="btn btn-danger" onclick="clearCache()">清空全部缓存</button>
+            </div>
+        </div>
+
+        <!-- 操作日志 -->
+        <div class="log-area" id="logArea">
+            <div class="log-entry"><span class="time">[--:--:--]</span> <span class="msg">等待连接...</span></div>
+        </div>
+    </div>
+
+    <script>
+        let ADMIN_BASE = '';
+        let TOKEN = '';
+
+        function getAdminBase() {
+            // 默认使用当前页面地址（admin 端口）
+            return window.location.origin;
+        }
+
+        function log(msg, type = '') {
+            const area = document.getElementById('logArea');
+            const now = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+            const entry = document.createElement('div');
+            entry.className = 'log-entry ' + type;
+            entry.innerHTML = `<span class="time">[${now}]</span> <span class="msg">${msg}</span>`;
+            area.appendChild(entry);
+            area.scrollTop = area.scrollHeight;
+        }
+
+        async function apiRequest(method, path, body = null) {
+            const url = ADMIN_BASE + path;
+            const opts = {
+                method,
+                headers: { 'Authorization': 'Bearer ' + TOKEN },
+            };
+            if (body) {
+                opts.headers['Content-Type'] = 'application/json';
+                opts.body = JSON.stringify(body);
+            }
+            const resp = await fetch(url, opts);
+            if (!resp.ok) {
+                const text = await resp.text();
+                throw new Error(`${resp.status}: ${text}`);
+            }
+            if (resp.status === 204) return null;
+            return resp.json();
+        }
+
+        async function connect() {
+            TOKEN = document.getElementById('tokenInput').value.trim();
+            if (!TOKEN) {
+                log('请输入 Admin Token', 'error');
+                return;
+            }
+            ADMIN_BASE = getAdminBase();
+            const dot = document.getElementById('healthDot');
+            dot.className = 'status-dot loading';
+            log('正在连接...');
+            try {
+                await refreshStats();
+                dot.className = 'status-dot ok';
+                document.getElementById('healthStatus').textContent = '已连接';
+                log('连接成功', 'success');
+            } catch (e) {
+                dot.className = 'status-dot err';
+                document.getElementById('healthStatus').textContent = '连接失败';
+                log('连接失败: ' + e.message, 'error');
+            }
+        }
+
+        async function refreshStats() {
+            try {
+                const data = await apiRequest('GET', '/__gateway/stats');
+                document.getElementById('statEntries').textContent = data.entries;
+                document.getElementById('statHits').textContent = data.hits;
+                document.getElementById('statMisses').textContent = data.misses;
+                const total = data.hits + data.misses;
+                const rate = total > 0 ? ((data.hits / total) * 100).toFixed(1) + '%' : '—';
+                document.getElementById('statHitRate').textContent = rate;
+                log('缓存统计已刷新');
+            } catch (e) {
+                log('刷新失败: ' + e.message, 'error');
+                throw e;
+            }
+        }
+
+        async function invalidateByTag() {
+            const tag = document.getElementById('tagInput').value.trim();
+            if (!tag) { log('请输入标签名', 'error'); return; }
+            try {
+                await apiRequest('POST', '/__gateway/invalidate', { tag });
+                log(`标签 "${tag}" 缓存已失效`, 'success');
+                await refreshStats();
+            } catch (e) {
+                log('标签失效失败: ' + e.message, 'error');
+            }
+        }
+
+        async function invalidateByPath() {
+            const path = document.getElementById('pathInput').value.trim();
+            if (!path) { log('请输入路径', 'error'); return; }
+            try {
+                await apiRequest('POST', '/__gateway/invalidate', { path });
+                log(`路径 "${path}" 缓存已失效`, 'success');
+                await refreshStats();
+            } catch (e) {
+                log('路径失效失败: ' + e.message, 'error');
+            }
+        }
+
+        async function clearCache() {
+            if (!confirm('确定要清空全部缓存吗？此操作不可逆。')) return;
+            try {
+                await apiRequest('DELETE', '/__gateway/cache');
+                log('全部缓存已清空', 'success');
+                await refreshStats();
+            } catch (e) {
+                log('清空缓存失败: ' + e.message, 'error');
+            }
+        }
+
+        // Enter 键触发连接
+        document.getElementById('tokenInput').addEventListener('keydown', e => {
+            if (e.key === 'Enter') connect();
+        });
+    </script>
+</body>
+</html>

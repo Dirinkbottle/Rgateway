@@ -118,13 +118,15 @@ mod tests {
                 allowed_headers: vec![],
                 max_age: 3600,
                 allow_credentials: false,
+                dev_localhost_bypass: false,
             },
             crypto: CryptoConfig {
-                hash_key_hex: "0".repeat(64),
                 max_nonce_jump: 10,
                 session_timeout_secs: 300,
                 challenge_timeout_secs: 60,
                 min_request_interval_ms: 10,
+                bootstrap_token_ttl_secs: 60,
+                bootstrap_rate_limit_per_min: 5,
             },
             rate_limit: RateLimitConfig {
                 default_rps: 50,
@@ -137,6 +139,8 @@ mod tests {
                 cookie_challenge_enabled: false,
             },
             rules,
+            reject_unknown_fields: false,
+            reject_unknown_query: false,
         }
     }
 

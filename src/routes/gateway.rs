@@ -5,13 +5,11 @@ use axum::{
     body::Bytes,
     extract::ConnectInfo,
     extract::State,
-    http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri},
+    http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::post,
 };
 use serde::Deserialize;
-
-use crate::cache::CachedResponse;
 
 use super::AppState;
 
@@ -24,6 +22,8 @@ pub fn router() -> Router<AppState> {
         .route("/gateway/watchdogbody", axum::routing::get(wasm_bg))
         .route("/gateway/watchdogheader", axum::routing::get(wasm_header))
         .route("/gateway/watchdogglue", axum::routing::get(wasm_glue))
+        // Bootstrap token 签发（短期一次性，用于后续 challenge 握手）
+        .route("/gateway/bootstrap", post(bootstrap_handler))
         // 挑战-响应握手
         .route("/gateway/challenge", post(challenge_handler))
         .route("/gateway/challenge/verify", post(challenge_verify_handler))
@@ -204,32 +204,49 @@ fn extract_client_ip(headers: &HeaderMap, peer_addr: IpAddr, trusted_proxies: &[
         if let Some(xff) = headers
             .get("x-forwarded-for")
             .and_then(|v| v.to_str().ok())
-        {
-            if let Some(first) = xff.split(',').next() {
-                if let Ok(ip) = first.trim().parse::<IpAddr>() {
+            && let Some(first) = xff.split(',').next()
+                && let Ok(ip) = first.trim().parse::<IpAddr>() {
                     return ip;
                 }
-            }
-        }
         // 其次 X-Real-IP
         if let Some(xri) = headers
             .get("x-real-ip")
             .and_then(|v| v.to_str().ok())
-        {
-            if let Ok(ip) = xri.parse::<IpAddr>() {
+            && let Ok(ip) = xri.parse::<IpAddr>() {
                 return ip;
             }
-        }
     }
 
     peer_addr
 }
 
 // ============================================================
-// 挑战-响应握手
+// Bootstrap Token + 挑战-响应握手
 // ============================================================
 
-/// POST /gateway/challenge — 生成挑战（绑定客户端 IP）
+/// POST /gateway/bootstrap — 签发短期一次性 bootstrap token
+async fn bootstrap_handler(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    let peer_addr = addr.ip();
+    let trusted = &state.watchdog_config.network.trusted_proxies;
+    let ip = extract_client_ip(&headers, peer_addr, trusted);
+
+    match state.challenge_manager.create_bootstrap_token(ip) {
+        Ok(token_hex) => Json(serde_json::json!({
+            "bootstrap_token": token_hex,
+        }))
+        .into_response(),
+        Err(e) => {
+            tracing::warn!("[bootstrap] 签发失败: {}, IP={}", e, ip);
+            (StatusCode::TOO_MANY_REQUESTS, e).into_response()
+        }
+    }
+}
+
+/// POST /gateway/challenge — 生成挑战（需要 X-Bootstrap-Token 头）
 async fn challenge_handler(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -239,15 +256,27 @@ async fn challenge_handler(
     let trusted = &state.watchdog_config.network.trusted_proxies;
     let ip = extract_client_ip(&headers, peer_addr, trusted);
 
-    match state.challenge_manager.create_challenge(ip) {
+    // 从 X-Bootstrap-Token 头提取 bootstrap token
+    let bootstrap_token = headers
+        .get("x-bootstrap-token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if bootstrap_token.is_empty() {
+        return (StatusCode::UNAUTHORIZED, "缺少 X-Bootstrap-Token 头").into_response();
+    }
+
+    match state
+        .challenge_manager
+        .create_challenge(ip, bootstrap_token)
+    {
         Ok((challenge_id, challenge_bytes)) => Json(serde_json::json!({
             "challenge_id": challenge_id,
-            "challenge": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &challenge_bytes),
+            "challenge": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, challenge_bytes),
         }))
         .into_response(),
         Err(e) => {
             tracing::warn!("[challenge] 创建失败: {}, IP={}", e, ip);
-            (StatusCode::TOO_MANY_REQUESTS, e).into_response()
+            (StatusCode::UNAUTHORIZED, e).into_response()
         }
     }
 }
@@ -285,7 +314,7 @@ async fn challenge_verify_handler(
     {
         Ok((session_id, ephemeral_key)) => Json(serde_json::json!({
             "session_id": session_id,
-            "ephemeral_key": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &ephemeral_key),
+            "ephemeral_key": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, ephemeral_key),
         }))
         .into_response(),
         Err(e) => {
@@ -318,10 +347,9 @@ async fn encrypted_relay_handler(
     let trusted = &state.watchdog_config.network.trusted_proxies;
     let ip = extract_client_ip(&headers, peer_addr, trusted);
 
-    tracing::info!(
-        "[encrypted_relay] incoming: ip={}, peer={}, body_len={}, ua={}",
-        ip,
-        peer_addr,
+    tracing::debug!(
+        "[encrypted_relay] incoming: ip={}, body_len={}, ua={}",
+        crate::log_redact::redact_ip(ip),
         body.len(),
         headers
             .get("user-agent")
@@ -331,9 +359,9 @@ async fn encrypted_relay_handler(
 
     // === 1. IP 频率限制 ===
     let (allowed, remaining) = state.rate_limiter.check(ip);
-    tracing::info!(
+    tracing::debug!(
         "[encrypted_relay] rate_limit: ip={}, allowed={}, remaining={}",
-        ip,
+        crate::log_redact::redact_ip(ip),
         allowed,
         remaining
     );
@@ -343,11 +371,22 @@ async fn encrypted_relay_handler(
     }
 
     // === 2. JA3 指纹校验 + Cookie 挑战 ===
-    let mut cookie_to_set: Option<String> = None;
     match state.ja3_filter.check(&headers, ip) {
-        Ok(None) => {}
+        Ok(None) => {} // 有有效 Cookie，继续
         Ok(Some(token)) => {
-            cookie_to_set = Some(token);
+            // 缺少有效 Cookie，返回 403 + Set-Cookie，客户端携带 Cookie 后重试
+            let mut resp = StatusCode::FORBIDDEN.into_response();
+            if let Ok(val) = HeaderValue::from_str(&format!(
+                "zfsg_token={}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=86400",
+                token
+            )) {
+                resp.headers_mut().insert("set-cookie", val);
+            }
+            resp.headers_mut().insert(
+                HeaderName::from_static("x-zfsg-reason"),
+                HeaderValue::from_static("cookie-challenge"),
+            );
+            return resp;
         }
         Err(e) => {
             tracing::warn!("[encrypted_relay] rejected by ja3: err={:?}, ip={}", e, ip);
@@ -358,12 +397,11 @@ async fn encrypted_relay_handler(
     // === 3. 解密 ===
     let decrypted = match state.decryptor.decrypt(ip, &body) {
         Ok(r) => {
-            tracing::info!(
-                "[encrypted_relay] decrypted: method={}, url={}, body_len={}, ip={}",
+            tracing::debug!(
+                "[encrypted_relay] decrypted: method={}, url={}, body_len={}",
                 r.method,
-                r.url,
-                r.body.len(),
-                ip
+                crate::log_redact::redact_url(&r.url),
+                r.body.len()
             );
             r
         }
@@ -451,27 +489,17 @@ async fn encrypted_relay_handler(
             let status = r.status;
             let resp_len = r.body.len();
             tracing::info!(
-                "[encrypted_relay] proxy ok: method={} path={} status={} resp_len={} ip={}",
+                "[encrypted_relay] proxy ok: method={} path={} status={} resp_len={}",
                 method,
                 proxy_path,
                 status.as_u16(),
                 resp_len,
-                ip
             );
             let mut resp = proxy_to_response(r);
             resp.headers_mut().insert(
                 HeaderName::from_static("x-zfsg"),
                 HeaderValue::from_static("decrypted"),
             );
-            // 设置 Cookie 挑战令牌
-            if let Some(cookie) = cookie_to_set {
-                if let Ok(val) = HeaderValue::from_str(&format!(
-                    "zfsg_token={}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=86400",
-                    cookie
-                )) {
-                    resp.headers_mut().insert("set-cookie", val);
-                }
-            }
             resp
         }
         Err(e) => {
@@ -498,199 +526,15 @@ async fn encrypted_relay_handler(
             };
             let resp = e.into_response();
             tracing::warn!(
-                "[encrypted_relay] proxy err: method={} path={} status={} ip={} err={}",
+                "[encrypted_relay] proxy err: method={} path={} status={} err={}",
                 method,
                 proxy_path,
                 resp.status().as_u16(),
-                ip,
                 err_summary
             );
             resp
         }
     }
-}
-
-/// 核心网关处理：查缓存 → 转发后端 → 落缓存 → 返回
-async fn gateway_handler(
-    State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    method: Method,
-    uri: Uri,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let peer_addr = addr.ip();
-    let trusted = &state.watchdog_config.network.trusted_proxies;
-    let ip = extract_client_ip(&headers, peer_addr, trusted);
-    tracing::info!("{} {} from {}", method, uri.path(), ip);
-
-    // === CORS 预检（使用 CorsGuard 校验 Origin 白名单）===
-    if method == Method::OPTIONS {
-        let origin = headers
-            .get("origin")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        return match state.cors_guard.handle_preflight(origin) {
-            Some((status, cors_headers)) => {
-                let mut resp = status.into_response();
-                for (name, value) in cors_headers {
-                    if let (Ok(n), Ok(v)) = (
-                        HeaderName::from_bytes(name.as_bytes()),
-                        HeaderValue::from_str(&value),
-                    ) {
-                        resp.headers_mut().insert(n, v);
-                    }
-                }
-                resp
-            }
-            None => StatusCode::FORBIDDEN.into_response(),
-        };
-    }
-
-    // === 注入检测 ===
-    let ua = headers
-        .get("user-agent")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let query_str = uri.query().unwrap_or("");
-    if let Some(reason) = state
-        .inject_guard
-        .inspect_request(uri.path(), query_str, "", ua)
-    {
-        tracing::warn!("注入检测: {}, IP={}", reason, ip);
-        return StatusCode::FORBIDDEN.into_response();
-    }
-
-    // === 参数校验 ===
-    match state
-        .param_validator
-        .validate(&method, uri.path(), query_str, &headers, &body)
-    {
-        crate::watchdog::params::ParamCheckResult::Ok => {}
-        crate::watchdog::params::ParamCheckResult::NoRule => {
-            return StatusCode::FORBIDDEN.into_response();
-        }
-        crate::watchdog::params::ParamCheckResult::MethodNotAllowed => {
-            return StatusCode::METHOD_NOT_ALLOWED.into_response();
-        }
-        crate::watchdog::params::ParamCheckResult::InvalidParam(msg) => {
-            return (StatusCode::BAD_REQUEST, msg).into_response();
-        }
-    }
-
-    let cache_key = format!(
-        "{}{}",
-        uri.path(),
-        uri.query().map(|q| format!("?{}", q)).unwrap_or_default()
-    );
-
-    let is_read = method == Method::GET || method == Method::HEAD;
-
-    if is_read && let Some(cached) = state.cache.get(&cache_key).await {
-        return hit(cached, &method, &headers, &state);
-    }
-
-    let proxy_method = if method == Method::HEAD {
-        &Method::GET
-    } else {
-        &method
-    };
-
-    match state
-        .proxy
-        .forward(proxy_method, uri.path(), uri.query(), &headers, &body)
-        .await
-    {
-        Ok(r) => {
-            if method == Method::GET && !r.skip_cache {
-                let cache_tag = r.cache_tag.clone();
-                let cached = CachedResponse::new(
-                    r.status,
-                    r.headers.clone(),
-                    r.body.clone(),
-                    r.cache_ttl,
-                    state.config.default_ttl,
-                );
-                state.cache.set(cache_key, cached, cache_tag).await;
-            }
-
-            miss(r, &method, &headers, &state)
-        }
-        Err(e) => {
-            let mut resp = e.into_response();
-            add_cors_headers_to_response(&mut resp, &headers, &state);
-            resp
-        }
-    }
-}
-
-/// 缓存命中
-fn hit(
-    cached: CachedResponse,
-    method: &Method,
-    headers: &HeaderMap,
-    state: &AppState,
-) -> Response {
-    let mut resp = cached_to_response(cached);
-    if *method == Method::HEAD {
-        *resp.body_mut() = axum::body::Body::empty();
-    }
-    resp.headers_mut().insert(
-        HeaderName::from_static("x-cache"),
-        HeaderValue::from_static("HIT"),
-    );
-    add_cors_headers_to_response(&mut resp, headers, state);
-    resp
-}
-
-/// 缓存未命中
-fn miss(
-    r: crate::proxy::ProxyResponse,
-    method: &Method,
-    headers: &HeaderMap,
-    state: &AppState,
-) -> Response {
-    let mut resp = proxy_to_response(r);
-    if *method == Method::HEAD {
-        *resp.body_mut() = axum::body::Body::empty();
-    }
-    resp.headers_mut().insert(
-        HeaderName::from_static("x-cache"),
-        HeaderValue::from_static("MISS"),
-    );
-    add_cors_headers_to_response(&mut resp, headers, state);
-    resp
-}
-
-/// 为响应添加 CORS 头（使用 CorsGuard 校验 Origin 白名单）
-fn add_cors_headers_to_response(resp: &mut Response, headers: &HeaderMap, state: &AppState) {
-    let origin = headers
-        .get("origin")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    for (name, value) in state.cors_guard.add_cors_headers(origin) {
-        if let (Ok(n), Ok(v)) = (
-            HeaderName::from_bytes(name.as_bytes()),
-            HeaderValue::from_str(&value),
-        ) {
-            resp.headers_mut().insert(n, v);
-        }
-    }
-}
-
-/// 缓存条目 → axum Response
-fn cached_to_response(cached: CachedResponse) -> Response {
-    let mut resp = Response::new(cached.body.into());
-    *resp.status_mut() = cached.status;
-    for (name, value) in cached.headers {
-        if let (Ok(n), Ok(v)) = (
-            HeaderName::from_bytes(name.as_bytes()),
-            HeaderValue::from_str(&value),
-        ) {
-            resp.headers_mut().insert(n, v);
-        }
-    }
-    resp
 }
 
 /// 代理响应 → axum Response

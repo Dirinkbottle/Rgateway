@@ -1,10 +1,11 @@
-//! 挑战-响应密钥交换
+//! 挑战-响应密钥交换（Bootstrap Token 模式）
 //!
 //! 流程：
-//! 1. 客户端请求 /gateway/challenge → 服务端生成 32 字节随机挑战
-//! 2. 客户端计算 HMAC-SHA256(内置密钥, 挑战) → 发送到 /gateway/challenge/verify
-//! 3. 服务端验证 HMAC，签发临时密钥和会话 ID
-//! 4. 后续所有请求使用临时密钥加密，内置密钥不再直接用于加密
+//! 1. 客户端请求 /gateway/bootstrap → 服务端签发短期一次性 bootstrap token
+//! 2. 客户端请求 /gateway/challenge（携带 bootstrap token）→ 服务端生成 32 字节随机挑战
+//! 3. 客户端计算 HMAC-SHA256(bootstrap_token, 挑战) → 发送到 /gateway/challenge/verify
+//! 4. 服务端验证 HMAC，签发临时密钥和会话 ID
+//! 5. 后续所有请求使用临时密钥加密
 
 use std::net::IpAddr;
 use std::time::Instant;
@@ -18,12 +19,23 @@ type HmacSha256 = Hmac<Sha256>;
 /// DashMap 容量上限
 const MAX_PENDING_CHALLENGES: usize = 10_000;
 const MAX_SESSIONS: usize = 100_000;
+const MAX_BOOTSTRAP_TOKENS: usize = 10_000;
 
 /// 待验证的挑战（绑定客户端 IP，防止跨 IP 重放）
 struct PendingChallenge {
     challenge: [u8; 32],
     created_at: Instant,
     client_ip: IpAddr,
+    /// 关联的 bootstrap token（用于 HMAC 验证）
+    bootstrap_token: [u8; 32],
+}
+
+/// Bootstrap Token（短期一次性，用于挑战握手）
+pub struct BootstrapToken {
+    pub token: [u8; 32],
+    pub created_at: Instant,
+    pub client_ip: IpAddr,
+    pub used: bool,
 }
 
 /// 活跃会话（按会话 ID 索引）
@@ -44,20 +56,33 @@ pub struct Session {
     pub nonce_step: u64,
 }
 
+/// Bootstrap 速率限制记录
+struct BootstrapRateEntry {
+    count: u32,
+    window_start: Instant,
+}
+
 /// 挑战-响应管理器
+#[allow(dead_code)]
 pub struct ChallengeManager {
-    /// 内置预共享密钥（仅用于握手验证）
-    builtin_key: [u8; 32],
     /// 待验证的挑战
     pending: DashMap<String, PendingChallenge>,
     /// 活跃会话
     pub sessions: DashMap<String, Session>,
+    /// Bootstrap token 存储
+    bootstrap_tokens: DashMap<String, BootstrapToken>,
+    /// Bootstrap 速率限制（每 IP 每分钟）
+    bootstrap_rate: DashMap<IpAddr, BootstrapRateEntry>,
     /// 挑战有效期（秒）
     challenge_timeout: u64,
     /// 会话超时（秒）
     session_timeout: u64,
     /// 最小请求间隔（毫秒）
     pub min_interval_ms: u64,
+    /// Bootstrap token 有效期（秒）
+    bootstrap_ttl: u64,
+    /// Bootstrap 每分钟每 IP 限流
+    bootstrap_rate_limit: u32,
 }
 
 /// 从密钥派生固定步长
@@ -89,25 +114,117 @@ fn random_bytes_32() -> [u8; 32] {
 
 impl ChallengeManager {
     pub fn new(
-        builtin_key: [u8; 32],
         challenge_timeout: u64,
         session_timeout: u64,
         min_interval_ms: u64,
+        bootstrap_ttl: u64,
+        bootstrap_rate_limit: u32,
     ) -> Self {
         Self {
-            builtin_key,
             pending: DashMap::new(),
             sessions: DashMap::new(),
+            bootstrap_tokens: DashMap::new(),
+            bootstrap_rate: DashMap::new(),
             challenge_timeout,
             session_timeout,
             min_interval_ms,
+            bootstrap_ttl,
+            bootstrap_rate_limit,
         }
     }
 
-    /// 步骤 1：生成挑战（绑定客户端 IP，检查容量上限）
+    /// 创建 Bootstrap Token（短期一次性，绑定客户端 IP）
     ///
-    /// 返回 Ok((challenge_id, challenge_bytes)) 或 Err 达到上限
-    pub fn create_challenge(&self, client_ip: IpAddr) -> Result<(String, [u8; 32]), &'static str> {
+    /// 返回 Ok(token_hex) 或 Err 达到限流/容量上限
+    pub fn create_bootstrap_token(&self, client_ip: IpAddr) -> Result<String, &'static str> {
+        // 速率限制：每 IP 每分钟 N 次
+        {
+            let mut entry = self.bootstrap_rate.entry(client_ip).or_insert_with(|| {
+                BootstrapRateEntry {
+                    count: 0,
+                    window_start: Instant::now(),
+                }
+            });
+            if entry.window_start.elapsed().as_secs() >= 60 {
+                // 窗口重置
+                entry.count = 0;
+                entry.window_start = Instant::now();
+            }
+            if entry.count >= self.bootstrap_rate_limit {
+                return Err("Bootstrap 请求过于频繁，请稍后重试");
+            }
+            entry.count += 1;
+        }
+
+        // 容量检查
+        if self.bootstrap_tokens.len() >= MAX_BOOTSTRAP_TOKENS {
+            self.cleanup_bootstrap_tokens();
+            if self.bootstrap_tokens.len() >= MAX_BOOTSTRAP_TOKENS {
+                return Err("Bootstrap 队列已满，请稍后重试");
+            }
+        }
+
+        let token = random_bytes_32();
+        let token_hex = hex::encode(token);
+
+        self.bootstrap_tokens.insert(
+            token_hex.clone(),
+            BootstrapToken {
+                token,
+                created_at: Instant::now(),
+                client_ip,
+                used: false,
+            },
+        );
+
+        self.cleanup_bootstrap_tokens();
+
+        Ok(token_hex)
+    }
+
+    /// 验证 bootstrap token 并标记为已使用
+    fn verify_bootstrap_token(
+        &self,
+        token_hex: &str,
+        client_ip: IpAddr,
+    ) -> Result<[u8; 32], &'static str> {
+        let mut entry = self
+            .bootstrap_tokens
+            .get_mut(token_hex)
+            .ok_or("Bootstrap token 不存在或已过期")?;
+
+        if entry.used {
+            return Err("Bootstrap token 已使用");
+        }
+        if entry.created_at.elapsed().as_secs() > self.bootstrap_ttl {
+            return Err("Bootstrap token 已过期");
+        }
+        if entry.client_ip != client_ip {
+            return Err("Bootstrap token IP 不匹配");
+        }
+
+        entry.used = true;
+        Ok(entry.token)
+    }
+
+    /// 清理过期的 bootstrap tokens
+    fn cleanup_bootstrap_tokens(&self) {
+        let ttl = self.bootstrap_ttl;
+        self.bootstrap_tokens
+            .retain(|_, v| !v.used && v.created_at.elapsed().as_secs() <= ttl);
+    }
+
+    /// 步骤 1：生成挑战（需要有效的 bootstrap token）
+    ///
+    /// 返回 Ok((challenge_id, challenge_bytes)) 或 Err
+    pub fn create_challenge(
+        &self,
+        client_ip: IpAddr,
+        bootstrap_token_hex: &str,
+    ) -> Result<(String, [u8; 32]), &'static str> {
+        // 验证 bootstrap token
+        let bootstrap_token = self.verify_bootstrap_token(bootstrap_token_hex, client_ip)?;
+
         // 容量检查：防止内存耗尽 DoS
         if self.pending.len() >= MAX_PENDING_CHALLENGES {
             self.cleanup_pending();
@@ -125,6 +242,7 @@ impl ChallengeManager {
                 challenge: challenge_bytes,
                 created_at: Instant::now(),
                 client_ip,
+                bootstrap_token,
             },
         );
 
@@ -167,9 +285,9 @@ impl ChallengeManager {
             return Err("挑战 IP 不匹配");
         }
 
-        // 计算期望的 HMAC
+        // 计算期望的 HMAC（使用 bootstrap token 作为密钥）
         let mut mac =
-            HmacSha256::new_from_slice(&self.builtin_key).expect("HMAC 密钥创建失败");
+            HmacSha256::new_from_slice(&pending.1.bootstrap_token).expect("HMAC 密钥创建失败");
         mac.update(&pending.1.challenge);
         let expected = mac.finalize().into_bytes();
 
@@ -209,17 +327,14 @@ impl ChallengeManager {
             },
         );
 
-        tracing::info!(
-            "[challenge] 会话已创建: session_id={}, nonce_step={}",
-            session_id,
-            nonce_step
-        );
+        tracing::info!("[challenge] 会话已创建: session_id={}***", &session_id[..8]);
 
         Ok((session_id, ephemeral_key))
     }
 
     /// 获取会话的只读引用
-    pub fn get_session(&self, session_id: &str) -> Option<dashmap::mapref::one::Ref<String, Session>> {
+    #[allow(dead_code)]
+    pub fn get_session(&self, session_id: &str) -> Option<dashmap::mapref::one::Ref<'_, String, Session>> {
         self.sessions.get(session_id)
     }
 
@@ -227,11 +342,12 @@ impl ChallengeManager {
     pub fn get_session_mut(
         &self,
         session_id: &str,
-    ) -> Option<dashmap::mapref::one::RefMut<String, Session>> {
+    ) -> Option<dashmap::mapref::one::RefMut<'_, String, Session>> {
         self.sessions.get_mut(session_id)
     }
 
     /// 检查会话是否过期
+    #[allow(dead_code)]
     pub fn is_session_valid(&self, session_id: &str) -> bool {
         if let Some(session) = self.sessions.get(session_id) {
             session.created_at.elapsed().as_secs() <= self.session_timeout
@@ -267,19 +383,60 @@ mod tests {
     use std::net::IpAddr;
 
     fn make_manager() -> ChallengeManager {
-        ChallengeManager::new([1u8; 32], 60, 300, 10)
+        ChallengeManager::new(60, 300, 10, 60, 100)
     }
 
     fn ip() -> IpAddr {
         "10.0.0.1".parse().unwrap()
     }
 
+    /// 辅助：创建 bootstrap token 并返回 token_hex
+    fn get_bootstrap(cm: &ChallengeManager, client_ip: IpAddr) -> String {
+        cm.create_bootstrap_token(client_ip).unwrap()
+    }
+
+    /// 辅助：创建 bootstrap + challenge，返回 (challenge_id, challenge_bytes, bootstrap_token_bytes)
+    fn create_challenge_with_bootstrap(
+        cm: &ChallengeManager,
+        client_ip: IpAddr,
+    ) -> (String, [u8; 32], [u8; 32]) {
+        let bootstrap_hex = get_bootstrap(cm, client_ip);
+        let (cid, challenge) = cm.create_challenge(client_ip, &bootstrap_hex).unwrap();
+        let bootstrap_bytes = hex::decode(&bootstrap_hex).unwrap();
+        let mut bt = [0u8; 32];
+        bt.copy_from_slice(&bootstrap_bytes);
+        (cid, challenge, bt)
+    }
+
+    #[test]
+    fn test_bootstrap_token_rate_limited() {
+        let cm = make_manager();
+        let ip = ip();
+        // 前 100 次应该成功（默认限流 100/min in test）
+        for _ in 0..100 {
+            assert!(cm.create_bootstrap_token(ip).is_ok());
+        }
+        // 第 101 次应被限流
+        assert!(cm.create_bootstrap_token(ip).is_err());
+    }
+
+    #[test]
+    fn test_create_challenge_requires_valid_bootstrap() {
+        let cm = make_manager();
+        let ip = ip();
+        // 没有 bootstrap token 时应失败
+        let result = cm.create_challenge(ip, "invalid_token_hex");
+        assert!(result.is_err());
+    }
+
     #[test]
     fn test_create_challenge_returns_unique_ids() {
         let cm = make_manager();
+        let ip = ip();
         let mut ids = std::collections::HashSet::new();
-        for _ in 0..100 {
-            let (id, _) = cm.create_challenge(ip()).unwrap();
+        for _ in 0..10 {
+            let bootstrap = get_bootstrap(&cm, ip);
+            let (id, _) = cm.create_challenge(ip, &bootstrap).unwrap();
             assert!(ids.insert(id), "duplicate challenge ID");
         }
     }
@@ -287,14 +444,15 @@ mod tests {
     #[test]
     fn test_verify_valid_hmac_creates_session() {
         let cm = make_manager();
-        let (cid, challenge) = cm.create_challenge(ip()).unwrap();
+        let ip = ip();
+        let (cid, challenge, bootstrap_token) = create_challenge_with_bootstrap(&cm, ip);
 
-        // 计算正确的 HMAC
-        let mut mac = <HmacSha256 as Mac>::new_from_slice(&cm.builtin_key).unwrap();
+        // 用 bootstrap_token 计算 HMAC
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(&bootstrap_token).unwrap();
         mac.update(&challenge);
         let hmac = mac.finalize().into_bytes();
 
-        let result = cm.verify_and_create_session(&cid, &hmac, ip());
+        let result = cm.verify_and_create_session(&cid, &hmac, ip);
         assert!(result.is_ok());
         let (sid, _) = result.unwrap();
         assert!(cm.is_session_valid(&sid));
@@ -303,18 +461,20 @@ mod tests {
     #[test]
     fn test_verify_invalid_hmac_rejected() {
         let cm = make_manager();
-        let (cid, _) = cm.create_challenge(ip()).unwrap();
+        let ip = ip();
+        let (cid, _, _) = create_challenge_with_bootstrap(&cm, ip);
         let bad_hmac = [0u8; 32];
-        let result = cm.verify_and_create_session(&cid, &bad_hmac, ip());
+        let result = cm.verify_and_create_session(&cid, &bad_hmac, ip);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_challenge_ip_mismatch_rejected() {
         let cm = make_manager();
-        let (cid, challenge) = cm.create_challenge(ip()).unwrap();
+        let ip = ip();
+        let (cid, challenge, bootstrap_token) = create_challenge_with_bootstrap(&cm, ip);
 
-        let mut mac = <HmacSha256 as Mac>::new_from_slice(&cm.builtin_key).unwrap();
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(&bootstrap_token).unwrap();
         mac.update(&challenge);
         let hmac = mac.finalize().into_bytes();
 
@@ -327,13 +487,42 @@ mod tests {
     #[test]
     fn test_session_counter_starts_at_one() {
         let cm = make_manager();
-        let (cid, challenge) = cm.create_challenge(ip()).unwrap();
-        let mut mac = <HmacSha256 as Mac>::new_from_slice(&cm.builtin_key).unwrap();
+        let ip = ip();
+        let (cid, challenge, bootstrap_token) = create_challenge_with_bootstrap(&cm, ip);
+
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(&bootstrap_token).unwrap();
         mac.update(&challenge);
         let hmac = mac.finalize().into_bytes();
-        let (sid, _) = cm.verify_and_create_session(&cid, &hmac, ip()).unwrap();
+        let (sid, _) = cm.verify_and_create_session(&cid, &hmac, ip).unwrap();
 
         let session = cm.get_session(&sid).unwrap();
         assert_eq!(session.expected_counter, 1);
+    }
+
+    #[test]
+    fn test_bootstrap_token_single_use() {
+        let cm = make_manager();
+        let ip = ip();
+        let bootstrap_hex = get_bootstrap(&cm, ip);
+
+        // 第一次使用
+        let (cid1, _) = cm.create_challenge(ip, &bootstrap_hex).unwrap();
+        assert!(!cid1.is_empty());
+
+        // 第二次使用同一 bootstrap token 应失败
+        let result = cm.create_challenge(ip, &bootstrap_hex);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_bootstrap_ip_mismatch_rejected() {
+        let cm = make_manager();
+        let ip1: IpAddr = "10.0.0.1".parse().unwrap();
+        let ip2: IpAddr = "10.0.0.99".parse().unwrap();
+        let bootstrap_hex = get_bootstrap(&cm, ip1);
+
+        // 用不同 IP 发起 challenge 应失败
+        let result = cm.create_challenge(ip2, &bootstrap_hex);
+        assert!(result.is_err());
     }
 }

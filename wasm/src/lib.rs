@@ -1,7 +1,12 @@
 //! ZFSG (Zero-Friction Security Gateway) — Wasm 核心模块
 //!
 //! 编译目标：wasm32-unknown-unknown
-//! 功能：挑战-响应握手获取临时密钥，劫持浏览器 fetch，全量加密请求
+//! 功能：Bootstrap Token → 挑战-响应握手获取临时密钥，劫持浏览器 fetch，全量加密请求
+//!
+//! 安全模型：
+//! - 不再内置长期密钥，改为服务端签发短期 bootstrap token
+//! - Bootstrap token 一次性使用，有效期 60 秒，绑定客户端 IP
+//! - 握手完成后获得临时会话密钥，用于后续加密通信
 
 mod crypto;
 mod interceptor;
@@ -14,13 +19,6 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
 use memory_pool::MemoryPool;
-
-/// 内置 Hash 密钥（32字节）— 仅用于挑战-响应握手，不直接用于加密
-const BUILTIN_HASH_KEY: [u8; 32] = [
-    0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32,
-    0x10, 0x0f, 0x1e, 0x2d, 0x3c, 0x4b, 0x5a, 0x69, 0x78, 0x87, 0x96, 0xa5, 0xb4, 0xc3, 0xd2,
-    0xe1, 0xf0,
-];
 
 /// 会话状态（挑战-响应握手后获得）
 struct SessionState {
@@ -64,14 +62,15 @@ unsafe fn pool_mut() -> &'static mut MemoryPool {
         .expect("内存池未初始化，请先调用 initialize()")
 }
 
-/// Wasm 模块初始化入口（异步 — 包含挑战-响应握手）
+/// Wasm 模块初始化入口（异步 — Bootstrap + 挑战-响应握手）
 ///
 /// 流程：
-/// 1. POST /gateway/challenge → 获取 challenge_id + challenge_bytes
-/// 2. 计算 HMAC-SHA256(BUILTIN_HASH_KEY, challenge_bytes)
-/// 3. POST /gateway/challenge/verify → 获取 session_id + ephemeral_key
-/// 4. 用临时密钥初始化内存池
-/// 5. 劫持 window.fetch
+/// 1. POST /gateway/bootstrap → 获取短期一次性 bootstrap_token
+/// 2. POST /gateway/challenge（携带 X-Bootstrap-Token）→ 获取 challenge_id + challenge_bytes
+/// 3. 计算 HMAC-SHA256(bootstrap_token, challenge_bytes)
+/// 4. POST /gateway/challenge/verify → 获取 session_id + ephemeral_key
+/// 5. 用临时密钥初始化内存池
+/// 6. 劫持 window.fetch
 #[wasm_bindgen]
 pub async fn initialize(gateway_origin: String) {
     // 保存网关地址
@@ -79,9 +78,22 @@ pub async fn initialize(gateway_origin: String) {
         *GATEWAY_ORIGIN.0.get() = Some(gateway_origin.clone());
     }
 
-    // 步骤 1：请求挑战
+    // 步骤 1：获取 bootstrap token（短期一次性，绑定 IP）
+    let bootstrap_url = format!("{}/gateway/bootstrap", gateway_origin);
+    let bootstrap_resp = js_fetch_post_json(&bootstrap_url, "").await;
+    let bootstrap_token_hex = js_json_get_string(&bootstrap_resp, "bootstrap_token");
+
+    web_sys::console::log_1(&"[ZFSG] Bootstrap token 已获取".into());
+
+    // 步骤 2：请求挑战（携带 bootstrap token）
     let challenge_url = format!("{}/gateway/challenge", gateway_origin);
-    let resp = js_fetch_post_json(&challenge_url, "").await;
+    let resp = js_fetch_post_json_with_header(
+        &challenge_url,
+        "",
+        "X-Bootstrap-Token",
+        &bootstrap_token_hex,
+    )
+    .await;
     let challenge_id = js_json_get_string(&resp, "challenge_id");
     let challenge_b64 = js_json_get_string(&resp, "challenge");
     let challenge_bytes = base64_decode(&challenge_b64);
@@ -90,17 +102,18 @@ pub async fn initialize(gateway_origin: String) {
         &format!("[ZFSG] 挑战已获取: challenge_id={}", challenge_id).into(),
     );
 
-    // 步骤 2：计算 HMAC-SHA256(BUILTIN_HASH_KEY, challenge_bytes)
+    // 步骤 3：计算 HMAC-SHA256(bootstrap_token, challenge_bytes)
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
     type HmacSha256 = Hmac<Sha256>;
 
+    let bootstrap_token_bytes = base64_decode(&bootstrap_token_hex);
     let mut mac =
-        <HmacSha256 as Mac>::new_from_slice(&BUILTIN_HASH_KEY).expect("HMAC 密钥创建失败");
+        <HmacSha256 as Mac>::new_from_slice(&bootstrap_token_bytes).expect("HMAC 密钥创建失败");
     mac.update(&challenge_bytes);
     let hmac_result = mac.finalize().into_bytes();
 
-    // 步骤 3：发送验证
+    // 步骤 4：发送验证
     let verify_url = format!("{}/gateway/challenge/verify", gateway_origin);
     let hmac_b64 = base64_encode(&hmac_result);
     let body_json = format!(
@@ -115,11 +128,9 @@ pub async fn initialize(gateway_origin: String) {
     let mut ephemeral_key = [0u8; 32];
     ephemeral_key.copy_from_slice(&ephemeral_key_bytes);
 
-    web_sys::console::log_1(
-        &format!("[ZFSG] 会话已建立: session_id={}", session_id_str).into(),
-    );
+    web_sys::console::log_1(&"[ZFSG] 安全会话已建立".into());
 
-    // 步骤 4：存储会话状态
+    // 步骤 5：存储会话状态
     unsafe {
         *SESSION.0.get() = Some(SessionState {
             session_id: session_id_str,
@@ -127,13 +138,13 @@ pub async fn initialize(gateway_origin: String) {
         });
     }
 
-    // 步骤 5：用临时密钥初始化内存池
+    // 步骤 6：用临时密钥初始化内存池
     let pool = MemoryPool::new(ephemeral_key);
     unsafe {
         *POOL.0.get() = Some(pool);
     }
 
-    // 步骤 6：劫持 fetch
+    // 步骤 7：劫持 fetch
     interceptor::hook_fetch();
 
     web_sys::console::log_1(
@@ -171,6 +182,44 @@ pub fn debug_session_id() -> String {
 // ============================================================
 // JS 互操作辅助函数
 // ============================================================
+
+/// POST JSON 到指定 URL（带自定义 header），返回解析后的 JsValue
+async fn js_fetch_post_json_with_header(
+    url: &str,
+    body: &str,
+    header_name: &str,
+    header_value: &str,
+) -> JsValue {
+    use web_sys::{Request, RequestInit, RequestMode};
+
+    let opts = RequestInit::new();
+    opts.set_method("POST");
+    opts.set_mode(RequestMode::Cors);
+
+    if !body.is_empty() {
+        opts.set_body(&JsValue::from_str(body));
+    }
+
+    let request = Request::new_with_str_and_init(url, &opts).expect("创建请求失败");
+    let headers = request.headers();
+    headers
+        .set("Content-Type", "application/json")
+        .expect("设置头失败");
+    headers
+        .set(header_name, header_value)
+        .expect("设置自定义头失败");
+
+    let win = web_sys::window().expect("无法获取 window");
+    let resp_val = JsFuture::from(win.fetch_with_request(&request))
+        .await
+        .expect("fetch 失败");
+    let resp: web_sys::Response = resp_val.dyn_into().expect("不是 Response");
+
+    let json_val = JsFuture::from(resp.json().expect("json() 失败"))
+        .await
+        .expect("解析 JSON 失败");
+    json_val
+}
 
 /// POST JSON 到指定 URL，返回解析后的 JsValue
 async fn js_fetch_post_json(url: &str, body: &str) -> JsValue {

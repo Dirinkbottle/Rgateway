@@ -20,6 +20,8 @@ pub struct CorsGuard {
     max_age: String,
     /// 是否允许携带凭证
     allow_credentials: bool,
+    /// 是否允许 localhost/127.0.0.1/0.0.0.0 任意端口（仅限开发环境）
+    dev_localhost_bypass: bool,
 }
 
 impl CorsGuard {
@@ -30,24 +32,26 @@ impl CorsGuard {
             allowed_headers: config.allowed_headers.join(", "),
             max_age: config.max_age.to_string(),
             allow_credentials: config.allow_credentials,
+            dev_localhost_bypass: config.dev_localhost_bypass,
         }
     }
 
     /// 检查 origin 是否在允许列表中
     ///
-    /// 支持精确匹配和 localhost/0.0.0.0 开发域名匹配（任意端口）
+    /// 支持精确匹配和 localhost/0.0.0.0 开发域名匹配（仅当 dev_localhost_bypass 启用时）
     fn is_origin_allowed(&self, origin: &str) -> bool {
         if self.allowed_origins.contains(origin) {
             return true;
         }
-        
-        // 开发域名：允许 localhost 和 0.0.0.0 的任意端口
-        if let Some(rest) = origin.strip_prefix("http://").or_else(|| origin.strip_prefix("https://")) {
-            let host = rest.split(':').next().unwrap_or(rest);
-            if host == "localhost" || host == "0.0.0.0" || host == "127.0.0.1" {
-                return true;
+
+        // 开发域名：仅当显式启用时允许 localhost 和 0.0.0.0 的任意端口
+        if self.dev_localhost_bypass
+            && let Some(rest) = origin.strip_prefix("http://").or_else(|| origin.strip_prefix("https://")) {
+                let host = rest.split(':').next().unwrap_or(rest);
+                if host == "localhost" || host == "0.0.0.0" || host == "127.0.0.1" {
+                    return true;
+                }
             }
-        }
         false
     }
 
@@ -59,9 +63,9 @@ impl CorsGuard {
         &self,
         origin: &str,
     ) -> Option<(axum::http::StatusCode, Vec<(String, String)>)> {
-        tracing::info!("CORS preflight: origin={}", origin);
+        tracing::debug!("CORS preflight: origin={}", origin);
         if !self.is_origin_allowed(origin) {
-            tracing::warn!("CORS rejected: origin={}", origin);
+            tracing::debug!("CORS rejected: origin={}", origin);
             return None;
         }
 
@@ -97,10 +101,11 @@ impl CorsGuard {
     /// 为实际请求添加 CORS 响应头
     ///
     /// Origin 不在白名单时返回空 Vec（不添加任何 CORS 头）
+    #[allow(dead_code)]
     pub fn add_cors_headers(&self, origin: &str) -> Vec<(String, String)> {
-        tracing::info!("CORS actual: origin={}", origin);
+        tracing::debug!("CORS actual: origin={}", origin);
         if !self.is_origin_allowed(origin) {
-            tracing::warn!("CORS rejected: origin={}", origin);
+            tracing::debug!("CORS rejected: origin={}", origin);
             return vec![];
         }
 
@@ -135,6 +140,7 @@ mod tests {
             allowed_headers: vec!["Content-Type".to_string()],
             max_age: 3600,
             allow_credentials: creds,
+            dev_localhost_bypass: true,
         })
     }
 
@@ -192,5 +198,39 @@ mod tests {
         let g = make_guard(false);
         let result = g.handle_preflight("http://evil.com");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_localhost_bypass_disabled() {
+        let g = CorsGuard::new(&CorsConfig {
+            allowed_origins: vec!["https://example.com".to_string()],
+            allowed_methods: vec!["GET".to_string()],
+            allowed_headers: vec![],
+            max_age: 3600,
+            allow_credentials: false,
+            dev_localhost_bypass: false,
+        });
+        // localhost 任意端口应被拒绝
+        assert!(!g.is_origin_allowed("http://localhost:3000"));
+        assert!(!g.is_origin_allowed("http://127.0.0.1:8080"));
+        assert!(!g.is_origin_allowed("http://0.0.0.0:9999"));
+        // 精确白名单仍通过
+        assert!(g.is_origin_allowed("https://example.com"));
+    }
+
+    #[test]
+    fn test_credentials_with_wildcard_origin_rejected() {
+        // allow_credentials=true 时，* origin 不应被允许
+        // （当前实现用精确匹配，这里验证 * 不在白名单中）
+        let g = CorsGuard::new(&CorsConfig {
+            allowed_origins: vec!["*".to_string()],
+            allowed_methods: vec!["GET".to_string()],
+            allowed_headers: vec![],
+            max_age: 3600,
+            allow_credentials: true,
+            dev_localhost_bypass: false,
+        });
+        // * 不会匹配任何具体 origin
+        assert!(!g.is_origin_allowed("http://example.com"));
     }
 }

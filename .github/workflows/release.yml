@@ -1,0 +1,113 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: rgateway
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: rgateway.exe
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: rgateway
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build Wasm
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          rustup target add wasm32-unknown-unknown
+          curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+          cd wasm && wasm-pack build --target web
+
+      - name: Prepare artifacts (Linux/macOS)
+        if: matrix.os != 'windows-latest'
+        run: |
+          mkdir -p release
+          cp target/${{ matrix.target }}/release/${{ matrix.artifact }} release/
+          cp watchdog.json release/watchdog.json.example
+          cp .env.example release/.env.example
+          if [ -d wasm/pkg ]; then
+            cp -r wasm/pkg release/wasm-pkg
+          fi
+
+      - name: Prepare artifacts (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release
+          Copy-Item target/${{ matrix.target }}/release/${{ matrix.artifact }} release/
+          Copy-Item watchdog.json release/watchdog.json.example
+          Copy-Item .env.example release/.env.example
+          if (Test-Path wasm/pkg) {
+            Copy-Item -Recurse wasm/pkg release/wasm-pkg
+          }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rgateway-${{ matrix.os }}
+          path: release/
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Package artifacts
+        run: |
+          cd artifacts
+          for dir in rgateway-*; do
+            zip -r "../${dir}.zip" "$dir"
+          done
+
+      - name: Determine release type
+        id: release_type
+        run: |
+          if [[ "${{ github.ref }}" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+          else
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.zip
+          generate_release_notes: true
+          prerelease: ${{ steps.release_type.outputs.prerelease }}

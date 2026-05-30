@@ -50,18 +50,14 @@ impl AppState {
 
         // 加载 Watchdog 配置
         let watchdog_config = WatchdogConfig::load(&config.watchdog_config_path);
-        let hash_key_bytes = hex::decode(&watchdog_config.crypto.hash_key_hex)
-            .expect("watchdog.json 中 hash_key_hex 无效（应为 64 字符 hex）");
-        let hash_key_arr: [u8; 32] = hash_key_bytes
-            .try_into()
-            .expect("hash_key_hex 解码后必须为 32 字节");
 
-        // 构建挑战-响应管理器
+        // 构建挑战-响应管理器（Bootstrap Token 模式，无需预共享密钥）
         let challenge_manager = ChallengeManager::new(
-            hash_key_arr,
             watchdog_config.crypto.challenge_timeout_secs,
             watchdog_config.crypto.session_timeout_secs,
             watchdog_config.crypto.min_request_interval_ms,
+            watchdog_config.crypto.bootstrap_token_ttl_secs,
+            watchdog_config.crypto.bootstrap_rate_limit_per_min,
         );
         let challenge_manager = Arc::new(challenge_manager);
 
@@ -71,14 +67,9 @@ impl AppState {
             watchdog_config.crypto.max_nonce_jump,
             watchdog_config.crypto.min_request_interval_ms,
         );
-        // Cookie 签名密钥：从 hash_key 派生（与加密密钥不同）
-        let mut cookie_key_hasher = sha2::Sha256::new();
-        use sha2::Digest;
-        cookie_key_hasher.update(b"zfsg-cookie-signing-key");
-        cookie_key_hasher.update(&hash_key_arr);
-        let cookie_key: [u8; 32] = cookie_key_hasher
-            .finalize()
-            .into();
+        // Cookie 签名密钥：每次启动生成随机密钥（重启后旧 cookie 失效，可接受）
+        let mut cookie_key = [0u8; 32];
+        getrandom::getrandom(&mut cookie_key).expect("Cookie 签名密钥生成失败");
 
         let ja3_filter = Ja3Filter::new(
             cookie_key,

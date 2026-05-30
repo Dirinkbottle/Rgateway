@@ -15,6 +15,12 @@ pub struct WatchdogConfig {
     pub rate_limit: RateLimitConfig,
     pub network: NetworkConfig,
     pub rules: Vec<Rule>,
+    /// 是否拒绝未在规则中声明的 body 字段
+    #[serde(default)]
+    pub reject_unknown_fields: bool,
+    /// 是否拒绝未在规则中声明的 query 参数
+    #[serde(default)]
+    pub reject_unknown_query: bool,
 }
 
 /// 网络配置
@@ -27,11 +33,9 @@ pub struct NetworkConfig {
     pub cookie_challenge_enabled: bool,
 }
 
-/// 加密相关配置（与 Wasm 端共享密钥）
+/// 加密相关配置
 #[derive(serde::Deserialize, Clone, serde::Serialize)]
 pub struct CryptoConfig {
-    /// 与 Wasm 共享的 Hash 密钥（hex 编码，64 字符 = 32 字节）
-    pub hash_key_hex: String,
     /// 滚动码最大允许跳跃（容忍网络乱序）
     pub max_nonce_jump: u64,
     /// 会话超时（秒），超时后重置滚动码
@@ -42,6 +46,20 @@ pub struct CryptoConfig {
     /// 同会话最小请求间隔（毫秒）
     #[serde(default = "default_min_interval")]
     pub min_request_interval_ms: u64,
+    /// Bootstrap Token 有效期（秒）
+    #[serde(default = "default_bootstrap_ttl")]
+    pub bootstrap_token_ttl_secs: u64,
+    /// Bootstrap 接口每分钟每 IP 限流
+    #[serde(default = "default_bootstrap_rate_limit")]
+    pub bootstrap_rate_limit_per_min: u32,
+}
+
+fn default_bootstrap_ttl() -> u64 {
+    60
+}
+
+fn default_bootstrap_rate_limit() -> u32 {
+    5
 }
 
 fn default_challenge_timeout() -> u64 {
@@ -60,6 +78,9 @@ pub struct CorsConfig {
     pub allowed_headers: Vec<String>,
     pub max_age: u32,
     pub allow_credentials: bool,
+    /// 是否允许 localhost/127.0.0.1/0.0.0.0 任意端口（仅限开发环境）
+    #[serde(default)]
+    pub dev_localhost_bypass: bool,
 }
 
 /// IP 频率限制配置
@@ -118,6 +139,7 @@ pub struct FieldRule {
     pub values: Option<Vec<String>>,
 }
 
+#[allow(dead_code)]
 impl WatchdogConfig {
     /// 从 JSON 文件加载配置
     pub fn load<P: AsRef<Path>>(path: P) -> Self {

@@ -71,7 +71,7 @@ impl Ja3Filter {
     ///
     /// 返回：
     /// - `Ok(None)` — 校验通过，已有有效 Cookie
-    /// - `Ok(Some(token))` — 校验通过，需要设置新 Cookie
+    /// - `Ok(Some(token))` — 校验通过，需要设置新 Cookie（调用方应返回 403 + Set-Cookie）
     /// - `Err(e)` — 校验失败，应拒绝请求
     pub fn check(&self, headers: &HeaderMap, ip: IpAddr) -> Result<Option<String>, Ja3Error> {
         // 1. User-Agent 检查
@@ -104,28 +104,28 @@ impl Ja3Filter {
 
         // 3. Cookie 挑战
         if self.cookie_enabled {
-            return self.check_cookie(headers);
+            return self.check_cookie(headers, ip);
         }
 
         Ok(None)
     }
 
     /// Cookie 挑战验证
-    fn check_cookie(&self, headers: &HeaderMap) -> Result<Option<String>, Ja3Error> {
-        if let Some(cookie_header) = headers.get("cookie").and_then(|v| v.to_str().ok()) {
-            if let Some(token) = parse_cookie(cookie_header, "zfsg_token") {
-                if self.verify_cookie_signature(&token) {
+    fn check_cookie(&self, headers: &HeaderMap, ip: IpAddr) -> Result<Option<String>, Ja3Error> {
+        if let Some(cookie_header) = headers.get("cookie").and_then(|v| v.to_str().ok())
+            && let Some(token) = parse_cookie(cookie_header, "zfsg_token") {
+                let ip_hash = self.hash_ip(ip);
+                if self.verify_cookie_signature(&token, &ip_hash) {
                     return Ok(None); // 有效 Cookie
                 }
             }
-        }
         // 无有效 Cookie，签发新令牌
-        let token = self.issue_cookie();
+        let token = self.issue_cookie(ip);
         Ok(Some(token))
     }
 
-    /// 签发新的 Cookie 令牌
-    fn issue_cookie(&self) -> String {
+    /// 签发新的 Cookie 令牌（绑定客户端 IP）
+    fn issue_cookie(&self, ip: IpAddr) -> String {
         // 容量检查
         if self.valid_cookies.len() >= MAX_VALID_COOKIES {
             self.cleanup_cookies();
@@ -138,7 +138,8 @@ impl Ja3Filter {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let payload = format!("{}:{}", nonce_hex, timestamp);
+        let ip_hash = self.hash_ip(ip);
+        let payload = format!("{}:{}:{}", nonce_hex, timestamp, ip_hash);
 
         let mut mac =
             <HmacSha256 as Mac>::new_from_slice(&self.cookie_signing_key).expect("HMAC 密钥创建失败");
@@ -155,8 +156,17 @@ impl Ja3Filter {
         token
     }
 
-    /// 验证 Cookie 签名
-    fn verify_cookie_signature(&self, token: &str) -> bool {
+    /// 对客户端 IP 做 SHA-256 哈希（前 8 字符 hex，用于 Cookie 绑定）
+    fn hash_ip(&self, ip: IpAddr) -> String {
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(ip.to_string().as_bytes());
+        hasher.update(self.cookie_signing_key); // 加盐，防止跨实例碰撞
+        hex::encode(hasher.finalize())[..8].to_string()
+    }
+
+    /// 验证 Cookie 签名和 IP 绑定
+    fn verify_cookie_signature(&self, token: &str, ip_hash: &str) -> bool {
         // 分割：payload.sig
         let Some(dot_pos) = token.rfind('.') else {
             return false;
@@ -179,6 +189,20 @@ impl Ja3Filter {
             return false;
         }
 
+        // 验证 IP 绑定：payload 格式为 nonce:timestamp:ip_hash
+        let parts: Vec<&str> = payload.splitn(3, ':').collect();
+        if parts.len() == 3 {
+            // 新格式：检查 IP 哈希
+            let eq_ip: bool = parts[2]
+                .as_bytes()
+                .ct_eq(ip_hash.as_bytes())
+                .into();
+            if !eq_ip {
+                return false;
+            }
+        }
+        // parts.len() == 2 时为旧格式（无 IP 绑定），向后兼容
+
         // 检查是否在有效集合中
         if let Some(entry) = self.valid_cookies.get(token) {
             entry.elapsed().as_secs() <= self.cookie_max_age
@@ -199,11 +223,10 @@ impl Ja3Filter {
 fn parse_cookie(cookie_header: &str, name: &str) -> Option<String> {
     for part in cookie_header.split(';') {
         let part = part.trim();
-        if let Some((k, v)) = part.split_once('=') {
-            if k.trim() == name {
+        if let Some((k, v)) = part.split_once('=')
+            && k.trim() == name {
                 return Some(v.trim().to_string());
             }
-        }
     }
     None
 }
@@ -267,7 +290,7 @@ mod tests {
         // 先获取 token
         let h1 = headers_with_ua("Mozilla/5.0");
         let token = f.check(&h1, ip).unwrap().unwrap();
-        // 携带 cookie 再次请求
+        // 携带 cookie 再次请求（同一 IP）
         let mut h2 = headers_with_ua("Mozilla/5.0");
         h2.insert(
             "cookie",
@@ -275,6 +298,25 @@ mod tests {
         );
         let result = f.check(&h2, ip).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_cookie_ip_mismatch_rejected() {
+        let f = make_filter(true);
+        let ip1: IpAddr = "10.0.0.5".parse().unwrap();
+        let ip2: IpAddr = "10.0.0.99".parse().unwrap();
+        // 用 ip1 获取 token
+        let h1 = headers_with_ua("Mozilla/5.0");
+        let token = f.check(&h1, ip1).unwrap().unwrap();
+        // 用 ip2 携带 cookie 请求 → 应被拒绝（IP 不匹配）
+        let mut h2 = headers_with_ua("Mozilla/5.0");
+        h2.insert(
+            "cookie",
+            HeaderValue::from_str(&format!("zfsg_token={}", token)).unwrap(),
+        );
+        let result = f.check(&h2, ip2).unwrap();
+        // IP 不匹配，返回新 token
+        assert!(result.is_some());
     }
 
     #[test]
