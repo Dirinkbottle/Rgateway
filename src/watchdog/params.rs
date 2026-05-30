@@ -29,11 +29,21 @@ pub enum ParamCheckResult {
 /// 参数校验器
 pub struct ParamValidator {
     buckets: RuleBuckets,
+    reject_unknown_fields: bool,
+    reject_unknown_query: bool,
 }
 
 impl ParamValidator {
-    pub fn new(buckets: RuleBuckets) -> Self {
-        Self { buckets }
+    pub fn new(
+        buckets: RuleBuckets,
+        reject_unknown_fields: bool,
+        reject_unknown_query: bool,
+    ) -> Self {
+        Self {
+            buckets,
+            reject_unknown_fields,
+            reject_unknown_query,
+        }
     }
 
     /// 校验请求参数
@@ -95,6 +105,17 @@ impl ParamValidator {
                     _ => {}
                 }
             }
+            // 拒绝未声明的 query 参数
+            if self.reject_unknown_query {
+                for qkey in query_params.keys() {
+                    if !query_rules.contains_key(*qkey) {
+                        return ParamCheckResult::InvalidParam(format!(
+                            "未声明的 Query 参数: '{}'",
+                            qkey
+                        ));
+                    }
+                }
+            }
         }
 
         // 5. Header 校验
@@ -125,8 +146,25 @@ impl ParamValidator {
 
         // 6. Body 校验（JSON）
         if let Some(ref body_rules) = rule.params.body {
-            // 有 body 规则时，非空 body 必须是合法 UTF-8 + JSON 对象
-            if !body.is_empty() {
+            // 检查是否有 required 字段
+            let has_required = body_rules.values().any(|r| r.required.unwrap_or(false));
+
+            if body.is_empty() {
+                // 空 body：如果有 required 字段则拒绝
+                if has_required {
+                    let missing: Vec<&str> = body_rules
+                        .iter()
+                        .filter(|(_, r)| r.required.unwrap_or(false))
+                        .map(|(k, _)| k.as_str())
+                        .collect();
+                    return ParamCheckResult::InvalidParam(format!(
+                        "缺少必需的 Body 字段: {}",
+                        missing.join(", ")
+                    ));
+                }
+                // 空 body 且无 required 字段，跳过 body 校验
+            } else {
+                // 非空 body 必须是合法 UTF-8 + JSON 对象
                 let body_str = match std::str::from_utf8(body) {
                     Ok(s) => s,
                     Err(_) => {
@@ -170,6 +208,17 @@ impl ParamValidator {
                             ));
                         }
                         _ => {}
+                    }
+                }
+                // 拒绝未声明的 body 字段
+                if self.reject_unknown_fields {
+                    for bkey in body_json.keys() {
+                        if !body_rules.contains_key(bkey) {
+                            return ParamCheckResult::InvalidParam(format!(
+                                "未声明的 Body 字段: '{}'",
+                                bkey
+                            ));
+                        }
                     }
                 }
             }
@@ -315,7 +364,7 @@ mod tests {
     fn validator(rules: Vec<Rule>) -> ParamValidator {
         let config = make_config(rules);
         let buckets = RuleBuckets::build(&config);
-        ParamValidator::new(buckets)
+        ParamValidator::new(buckets, false, false)
     }
 
     #[test]
@@ -454,13 +503,12 @@ mod tests {
     }
 
     #[test]
-    fn test_body_empty_passes_when_rules_exist() {
+    fn test_body_empty_rejected_when_required_fields_exist() {
         let v = validator(vec![rule_with_body()]);
         let headers = HeaderMap::new();
-        // 空 body 跳过校验（GET 类似场景），但 name 是 required
-        // 空 body 时不会触发 body 校验（因为 body.is_empty()）
+        // 空 body + 有 required 字段 → 应拒绝
         let result = v.validate(&Method::POST, "/api/items", "", &headers, &[]);
-        assert!(matches!(result, ParamCheckResult::Ok));
+        assert!(matches!(result, ParamCheckResult::InvalidParam(ref msg) if msg.contains("name")));
     }
 
     #[test]

@@ -23,10 +23,19 @@ pub fn router() -> Router<AppState> {
         .route("/gateway/watchdogheader", axum::routing::get(wasm_header))
         .route("/gateway/watchdogglue", axum::routing::get(wasm_glue))
         // Bootstrap token 签发（短期一次性，用于后续 challenge 握手）
-        .route("/gateway/bootstrap", post(bootstrap_handler))
+        .route(
+            "/gateway/bootstrap",
+            post(bootstrap_handler).options(cors_preflight),
+        )
         // 挑战-响应握手
-        .route("/gateway/challenge", post(challenge_handler))
-        .route("/gateway/challenge/verify", post(challenge_verify_handler))
+        .route(
+            "/gateway/challenge",
+            post(challenge_handler).options(cors_preflight),
+        )
+        .route(
+            "/gateway/challenge/verify",
+            post(challenge_verify_handler).options(cors_preflight),
+        )
         // Wasm 加密中继入口
         .route(
             "/gateway/encrypted_relay",
@@ -36,6 +45,22 @@ pub fn router() -> Router<AppState> {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+/// 为响应添加 CORS 头（从请求 Origin 判断）
+fn apply_cors(resp: &mut Response, headers: &HeaderMap, state: &AppState) {
+    let origin = headers
+        .get("origin")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    for (name, value) in state.cors_guard.add_cors_headers(origin) {
+        if let (Ok(n), Ok(v)) = (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(&value),
+        ) {
+            resp.headers_mut().insert(n, v);
+        }
+    }
 }
 
 /// CORS 预检（使用 CorsGuard 校验 Origin 白名单）
@@ -226,7 +251,7 @@ async fn bootstrap_handler(
     let trusted = &state.watchdog_config.network.trusted_proxies;
     let ip = extract_client_ip(&headers, peer_addr, trusted);
 
-    match state.challenge_manager.create_bootstrap_token(ip) {
+    let mut resp = match state.challenge_manager.create_bootstrap_token(ip) {
         Ok(token_hex) => Json(serde_json::json!({
             "bootstrap_token": token_hex,
         }))
@@ -235,7 +260,9 @@ async fn bootstrap_handler(
             tracing::warn!("[bootstrap] 签发失败: {}, IP={}", e, ip);
             (StatusCode::TOO_MANY_REQUESTS, e).into_response()
         }
-    }
+    };
+    apply_cors(&mut resp, &headers, &state);
+    resp
 }
 
 /// POST /gateway/challenge — 生成挑战（需要 X-Bootstrap-Token 头）
@@ -257,7 +284,7 @@ async fn challenge_handler(
         return (StatusCode::UNAUTHORIZED, "缺少 X-Bootstrap-Token 头").into_response();
     }
 
-    match state
+    let mut resp = match state
         .challenge_manager
         .create_challenge(ip, bootstrap_token)
     {
@@ -270,7 +297,9 @@ async fn challenge_handler(
             tracing::warn!("[challenge] 创建失败: {}, IP={}", e, ip);
             (StatusCode::UNAUTHORIZED, e).into_response()
         }
-    }
+    };
+    apply_cors(&mut resp, &headers, &state);
+    resp
 }
 
 #[derive(Deserialize)]
@@ -298,7 +327,7 @@ async fn challenge_verify_handler(
             }
         };
 
-    match state
+    let mut resp = match state
         .challenge_manager
         .verify_and_create_session(&body.challenge_id, &response_bytes, ip)
     {
@@ -311,7 +340,9 @@ async fn challenge_verify_handler(
             tracing::warn!("[challenge] 验证失败: {}", e);
             (StatusCode::UNAUTHORIZED, e).into_response()
         }
-    }
+    };
+    apply_cors(&mut resp, &headers, &state);
+    resp
 }
 
 // ============================================================
@@ -406,9 +437,11 @@ async fn encrypted_relay_handler(
         .get("user-agent")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
+    // 对解密后的 body 做 lossy UTF-8 转换后传入注入检测
+    let body_as_str = String::from_utf8_lossy(&decrypted.body);
     if let Some(reason) = state
         .inject_guard
-        .inspect_request(&decrypted.url, "", "", ua)
+        .inspect_request(&decrypted.url, "", &body_as_str, ua)
     {
         tracing::warn!(
             "[encrypted_relay] rejected by injection: reason={}, ip={}",

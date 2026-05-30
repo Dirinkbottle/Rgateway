@@ -107,7 +107,8 @@ pub async fn initialize(gateway_origin: String) {
     use sha2::Sha256;
     type HmacSha256 = Hmac<Sha256>;
 
-    let bootstrap_token_bytes = base64_decode(&bootstrap_token_hex);
+    let bootstrap_token_bytes = hex_decode(&bootstrap_token_hex);
+    assert_eq!(bootstrap_token_bytes.len(), 32, "bootstrap token 必须为 32 字节");
     let mut mac =
         <HmacSha256 as Mac>::new_from_slice(&bootstrap_token_bytes).expect("HMAC 密钥创建失败");
     mac.update(&challenge_bytes);
@@ -270,4 +271,9 @@ fn base64_decode(b64: &str) -> Vec<u8> {
     base64::engine::general_purpose::STANDARD
         .decode(b64)
         .expect("base64 解码失败")
+}
+
+/// Hex 解码（纯 Rust）
+fn hex_decode(hex: &str) -> Vec<u8> {
+    hex::decode(hex).expect("hex 解码失败")
 }

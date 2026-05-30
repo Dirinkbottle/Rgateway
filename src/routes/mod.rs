@@ -74,7 +74,11 @@ impl AppState {
 
         // 构建规则匹配器 + 参数校验器
         let rule_buckets = crate::watchdog::matcher::RuleBuckets::build(&watchdog_config);
-        let param_validator = ParamValidator::new(rule_buckets);
+        let param_validator = ParamValidator::new(
+            rule_buckets,
+            watchdog_config.reject_unknown_fields,
+            watchdog_config.reject_unknown_query,
+        );
 
         Self {
             cache: Arc::new(cache),

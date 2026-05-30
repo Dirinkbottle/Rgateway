@@ -150,7 +150,15 @@
             const now = new Date().toLocaleTimeString('zh-CN', { hour12: false });
             const entry = document.createElement('div');
             entry.className = 'log-entry ' + type;
-            entry.innerHTML = `<span class="time">[${now}]</span> <span class="msg">${msg}</span>`;
+            const timeSpan = document.createElement('span');
+            timeSpan.className = 'time';
+            timeSpan.textContent = `[${now}]`;
+            const msgSpan = document.createElement('span');
+            msgSpan.className = 'msg';
+            msgSpan.textContent = msg;
+            entry.appendChild(timeSpan);
+            entry.appendChild(document.createTextNode(' '));
+            entry.appendChild(msgSpan);
             area.appendChild(entry);
             area.scrollTop = area.scrollHeight;
         }
