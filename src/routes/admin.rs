@@ -61,10 +61,7 @@ fn verify_admin_auth(
     // 常量时间比较，防时序攻击
     use subtle::ConstantTimeEq;
     if token.len() == expected_token.len() {
-        let eq: bool = token
-            .as_bytes()
-            .ct_eq(expected_token.as_bytes())
-            .into();
+        let eq: bool = token.as_bytes().ct_eq(expected_token.as_bytes()).into();
         if eq {
             return Ok(());
         }
@@ -86,10 +83,8 @@ struct InvalidateBody {
 
 /// GET / 或 /admin — 管理面板
 async fn admin_panel() -> Response {
-    match tokio::task::spawn_blocking(|| {
-        std::fs::read_to_string("./frontend/admin/index.html")
-    })
-    .await
+    match tokio::task::spawn_blocking(|| std::fs::read_to_string("./frontend/admin/index.html"))
+        .await
     {
         Ok(Ok(html)) => (
             [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],

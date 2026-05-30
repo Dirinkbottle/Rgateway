@@ -91,11 +91,7 @@ fn derive_nonce_step(key: &[u8; 32]) -> u64 {
     hasher.update(key);
     let hash = hasher.finalize();
     let step = u64::from_le_bytes(hash[..8].try_into().expect("步长哈希切片长度正确"));
-    if step == 0 {
-        1
-    } else {
-        step
-    }
+    if step == 0 { 1 } else { step }
 }
 
 /// 生成 32 字节随机 ID（hex 编码返回）
@@ -139,12 +135,13 @@ impl ChallengeManager {
     pub fn create_bootstrap_token(&self, client_ip: IpAddr) -> Result<String, &'static str> {
         // 速率限制：每 IP 每分钟 N 次
         {
-            let mut entry = self.bootstrap_rate.entry(client_ip).or_insert_with(|| {
-                BootstrapRateEntry {
-                    count: 0,
-                    window_start: Instant::now(),
-                }
-            });
+            let mut entry =
+                self.bootstrap_rate
+                    .entry(client_ip)
+                    .or_insert_with(|| BootstrapRateEntry {
+                        count: 0,
+                        window_start: Instant::now(),
+                    });
             if entry.window_start.elapsed().as_secs() >= 60 {
                 // 窗口重置
                 entry.count = 0;
@@ -293,10 +290,7 @@ impl ChallengeManager {
 
         // 常量时间比较
         use subtle::ConstantTimeEq;
-        let eq: bool = expected
-            .as_slice()
-            .ct_eq(client_hmac)
-            .into();
+        let eq: bool = expected.as_slice().ct_eq(client_hmac).into();
         if !eq {
             return Err("挑战验证失败：HMAC 不匹配");
         }
@@ -334,7 +328,10 @@ impl ChallengeManager {
 
     /// 获取会话的只读引用
     #[allow(dead_code)]
-    pub fn get_session(&self, session_id: &str) -> Option<dashmap::mapref::one::Ref<'_, String, Session>> {
+    pub fn get_session(
+        &self,
+        session_id: &str,
+    ) -> Option<dashmap::mapref::one::Ref<'_, String, Session>> {
         self.sessions.get(session_id)
     }
 

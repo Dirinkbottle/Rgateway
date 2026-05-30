@@ -143,9 +143,8 @@ pub struct FieldRule {
 impl WatchdogConfig {
     /// 从 JSON 文件加载配置
     pub fn load<P: AsRef<Path>>(path: P) -> Self {
-        let content = std::fs::read_to_string(path.as_ref()).unwrap_or_else(|e| {
-            panic!("无法读取 Watchdog 配置文件 {:?}: {}", path.as_ref(), e)
-        });
+        let content = std::fs::read_to_string(path.as_ref())
+            .unwrap_or_else(|e| panic!("无法读取 Watchdog 配置文件 {:?}: {}", path.as_ref(), e));
         Self::from_json_str(&content)
     }
 
